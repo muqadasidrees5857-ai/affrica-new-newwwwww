@@ -8,6 +8,7 @@ import {
   Menu, X, RefreshCw,
 } from 'lucide-react'
 import './App.css'
+import './App.override.css'
 
 const COLORS = {
   'Within KPI': '#16A34A',
@@ -249,10 +250,34 @@ function GroupKpiChart({ group, rows }) {
   )
 }
 
-function RecordTable({ sectionId, title, description, rows, onDetails, onActionDetails }) {
+const headerSelectStyle = {
+  display: 'block', width: '100%', minWidth: '120px', maxWidth: '220px', marginTop: '6px',
+  padding: '4px 6px', fontSize: '12px', fontWeight: 400, textTransform: 'none', letterSpacing: 'normal',
+  color: '#172033', background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer',
+}
+
+// Excel-style dropdown that sits under a table column title.
+function HeaderFilter({ label, value, onChange, list = [], hasBlank = false, formatValue }) {
+  const items = value && value !== BLANK_OPTION && !list.includes(value) ? [...list, value] : list
+  return (
+    <select
+      className="header-filter-select"
+      style={headerSelectStyle}
+      value={value || ''}
+      onChange={event => onChange(event.target.value)}
+      aria-label={`Filter by ${label}`}
+    >
+      <option value="">All</option>
+      {hasBlank && <option value={BLANK_OPTION}>(Blank)</option>}
+      {items.map(item => <option key={item} value={item}>{formatValue ? formatValue(item) : item}</option>)}
+    </select>
+  )
+}
+
+const KPI_STATUS_LIST = ['Within KPI', 'Exception', 'Major Exception', 'Date Missing']
+
+function RecordTable({ sectionId, title, description, rows, onDetails, options, columnFilters, onColumnFilter, statusFilter, onStatusFilter }) {
   const [expanded, setExpanded] = useState(false)
-  const [showActions, setShowActions] = useState(true)
-  const majorRows = rows.filter(row => row._kpi === 'Major Exception')
   const visibleRows = expanded ? rows : rows.slice(0, 8)
 
   async function downloadFullTableScreenshot() {
@@ -274,6 +299,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, onActionD
 
       // Capture an isolated copy outside the dashboard's scroll/overflow containers.
       const tableClone = sourceTable.cloneNode(true)
+      tableClone.querySelectorAll('select').forEach(element => element.remove())
       tableClone.querySelectorAll('th').forEach(th => {
         th.style.position = 'static'
         th.style.top = 'auto'
@@ -353,9 +379,39 @@ function RecordTable({ sectionId, title, description, rows, onDetails, onActionD
       <div className="table-wrap full-columns-table-wrap">
         <table className="wide-operations-table">
           <thead><tr>
-            <th className="days-count-th">Days Count (Today − Reporting Date)</th>
-            {EXCEL_COLUMNS.map(column => <th key={column}>{column}</th>)}
-            <th>KPI Status</th><th>Details</th>
+            <th className="days-count-th">
+              Days Count (Today − Reporting Date)
+              <HeaderFilter
+                label={filterLabel(DAYS_FILTER)}
+                value={columnFilters[DAYS_FILTER]}
+                onChange={value => onColumnFilter(DAYS_FILTER, value)}
+                list={options[DAYS_FILTER]?.list}
+                hasBlank={options[DAYS_FILTER]?.hasBlank}
+                formatValue={value => `${value} ${value === '1' ? 'day' : 'days'}`}
+              />
+            </th>
+            {EXCEL_COLUMNS.map(column => (
+              <th key={column}>
+                {column}
+                <HeaderFilter
+                  label={column}
+                  value={columnFilters[column]}
+                  onChange={value => onColumnFilter(column, value)}
+                  list={options[column]?.list}
+                  hasBlank={options[column]?.hasBlank}
+                />
+              </th>
+            ))}
+            <th>
+              KPI Status
+              <HeaderFilter
+                label="KPI Status"
+                value={statusFilter === 'all' ? '' : statusFilter}
+                onChange={value => onStatusFilter(value || 'all')}
+                list={KPI_STATUS_LIST}
+              />
+            </th>
+            <th>Details</th>
           </tr></thead>
           <tbody>
             {visibleRows.map(row => (
@@ -378,30 +434,6 @@ function RecordTable({ sectionId, title, description, rows, onDetails, onActionD
       </div>
 
       {rows.length > 8 && <button className="show-all-button" onClick={() => setExpanded(!expanded)}>{expanded ? 'Show fewer records' : `Show all ${rows.length} records`}</button>}
-
-      <section className="action-needed">
-        <button className="action-heading" onClick={() => setShowActions(!showActions)}>
-          <span className="action-heading-icon"><AlertTriangle size={19} /></span>
-          <span className="action-heading-text"><strong>Action Needed</strong><small>Major exceptions requiring operational follow-up</small></span>
-          <span className="action-number">{majorRows.length}</span>
-          <ChevronDown size={18} className={showActions ? 'rotate-icon' : ''} />
-        </button>
-        {showActions && <div className="action-content">
-          {majorRows.length === 0 ? (
-            <p className="no-actions"><CircleCheck size={17} />No major exceptions in this group.</p>
-          ) : (
-            <div className="action-list">
-              {majorRows.slice(0, 10).map(row => (
-                <button key={row._id} className="action-item" onClick={() => onActionDetails(row)}>
-                  <span className="action-item-main"><strong>{clean(row['Delivery Number']) || 'Unnamed delivery'}</strong><small>{clean(row['Pickup Point: Location Name']) || 'Pickup point not provided'}</small></span>
-                  <span className="action-item-days">{row._days} days</span><Eye size={16} />
-                </button>
-              ))}
-              {majorRows.length > 10 && <p className="action-more">And {majorRows.length - 10} more major exceptions in this table.</p>}
-            </div>
-          )}
-        </div>}
-      </section>
     </section>
   )
 }
@@ -434,7 +466,8 @@ function App() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
-  const [columnFilters, setColumnFilters] = useState(emptyColumnFilters)
+  const emptyTableFilters = () => Object.fromEntries(GROUPS.map(group => [group.id, emptyColumnFilters()]))
+  const [tableFilters, setTableFilters] = useState(emptyTableFilters)
   const [groupFilter, setGroupFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
@@ -487,7 +520,7 @@ function App() {
       setRows(waitingRows)
       setFileName(file.name)
       setSearch('')
-      setColumnFilters(emptyColumnFilters())
+      setTableFilters(emptyTableFilters())
       setGroupFilter('all')
       setCategoryFilter('all')
       setStatusFilter('all')
@@ -499,7 +532,8 @@ function App() {
     }
   }
 
-  const filteredRows = useMemo(() => {
+  // Toolbar filters (search, pickup group, KPI status) apply to the whole dashboard.
+  const baseRows = useMemo(() => {
     const query = search.trim().toLowerCase()
     return currentRows.filter(row => {
       const groupMatches = groupFilter === 'all' || row._group === groupFilter
@@ -509,17 +543,28 @@ function App() {
         ...EXCEL_COLUMNS.map(column => column.includes('Date') ? `${formatDate(row[column])} ${clean(row[column])}` : clean(row[column])),
         String(row._days ?? ''), row._kpi,
       ].some(value => value.toLowerCase().includes(query))
-      const columnMatches = FILTER_COLUMNS.every(column => {
-        const selected = columnFilters[column]
+      return groupMatches && categoryMatches && statusMatches && searchMatches
+    })
+  }, [currentRows, search, groupFilter, categoryFilter, statusFilter])
+
+  // Header dropdowns belong to one table only, so choosing a value in one table never empties the others.
+  const rowsByGroup = useMemo(() => Object.fromEntries(GROUPS.map(group => {
+    const filters = tableFilters[group.id] || {}
+    const groupRows = baseRows
+      .filter(row => row._group === group.id)
+      .filter(row => FILTER_COLUMNS.every(column => {
+        const selected = filters[column]
         if (!selected) return true
         const value = getColumnValue(row, column)
         return selected === BLANK_OPTION ? value === '' : value === selected
-      })
-      return groupMatches && categoryMatches && statusMatches && searchMatches && columnMatches
-    })
-  }, [currentRows, search, columnFilters, groupFilter, categoryFilter, statusFilter])
+      }))
+    return [group.id, groupRows]
+  })), [baseRows, tableFilters])
 
-  // Dropdown options: every distinct value found in the uploaded data, per column.
+  // KPI cards and the overall chart count whatever the three tables currently show.
+  const filteredRows = useMemo(() => GROUPS.flatMap(group => rowsByGroup[group.id]), [rowsByGroup])
+
+  // Dropdown options: every distinct value found in the whole uploaded file (all countries, all pickup points...).
   const columnOptions = useMemo(() => {
     const result = {}
     FILTER_COLUMNS.forEach(column => {
@@ -530,7 +575,7 @@ function App() {
         if (value === '') hasBlank = true
         else values.add(value)
       })
-      let list = [...values]
+      const list = [...values]
       if (column === DAYS_FILTER) list.sort((a, b) => Number(a) - Number(b))
       else if (column.includes('Date')) list.sort((a, b) => getDate(a)?.getTime() - getDate(b)?.getTime())
       else list.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
@@ -560,7 +605,7 @@ function App() {
 
   function resetFilters() {
     setSearch('')
-    setColumnFilters(emptyColumnFilters())
+    setTableFilters(emptyTableFilters())
     setGroupFilter('all')
     setCategoryFilter('all')
     setStatusFilter('all')
@@ -586,7 +631,7 @@ function App() {
 
       <div className="main-area">
         <header className="topbar">
-          <button className="mobile-menu" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={21} /></button>
+          <button className="mobile-menu" aria-label="Toggle navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(open => !open)} type="button"><Menu size={21} /></button>
           <div className="topbar-title"><span>Operations /</span> Loading Performance</div>
           <label className="upload-button"><Upload size={17} />{loading ? 'Reading file...' : 'Upload Excel File'}<input type="file" accept=".xlsx,.xls,.csv" hidden disabled={loading} onChange={handleFileUpload} /></label>
         </header>
@@ -631,42 +676,15 @@ function App() {
 
           <section aria-label="KPI performance by pickup group" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '18px', marginTop: '20px', marginBottom: '24px' }}>
             {GROUPS.map(group => (
-              <GroupKpiChart key={group.id} group={group.id} rows={filteredRows.filter(row => row._group === group.id)} />
+              <GroupKpiChart key={group.id} group={group.id} rows={rowsByGroup[group.id] || []} />
             ))}
           </section>
 
-          <section className="panel filters-panel all-column-filters-panel">
-            <div className="filter-title"><div><h2>Search & Filter Records</h2><p>Har column ka apna dropdown filter hai (Days Count samet). List mein se value select karein, type karne ki zaroorat nahi.</p></div><button className="reset-button" onClick={resetFilters}>Reset all</button></div>
-            <div className="filter-controls filter-controls-main">
-              <label className="filter-search"><Search size={17} /><input type="search" placeholder="Search across all columns..." value={search} onChange={event => setSearch(event.target.value)} /></label>
-              <label className="filter-select"><span>Operational Category</span><select value={categoryFilter} onChange={event => setCategoryFilter(event.target.value)}><option value="all">All categories</option><option value="waiting to load">Waiting To Load</option><option value="waiting for documents">Waiting for Documents</option></select></label>
-              <label className="filter-select"><span>Pickup Group</span><select value={groupFilter} onChange={event => setGroupFilter(event.target.value)}><option value="all">All pickup groups</option>{GROUPS.map(group => <option key={group.id} value={group.id}>{group.label}</option>)}</select></label>
-              <label className="filter-select"><span>KPI Status</span><select value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="all">All KPI statuses</option><option value="Within KPI">Within KPI</option><option value="Exception">Exception</option><option value="Major Exception">Major Exception</option><option value="Date Missing">Date Missing</option></select></label>
-            </div>
-            <div className="column-filter-grid">
-              {FILTER_COLUMNS.map((column, index) => {
-                const options = columnOptions[column] || { list: [], hasBlank: false }
-                return (
-                  <label className="column-filter-field" key={column}>
-                    <span><b>{String(index + 1).padStart(2, '0')}</b>{filterLabel(column)}</span>
-                    <select
-                      className="column-filter-select"
-                      style={{ width: '100%', padding: '9px 10px', border: '1px solid #d6dce8', borderRadius: '8px', background: '#fff', fontSize: '13px', color: '#172033' }}
-                      value={columnFilters[column] || ''}
-                      onChange={event => setColumnFilters(current => ({ ...current, [column]: event.target.value }))}
-                      aria-label={`Filter by ${filterLabel(column)}`}
-                    >
-                      <option value="">All</option>
-                      {options.hasBlank && <option value={BLANK_OPTION}>(Blank)</option>}
-                      {options.list.map(value => (
-                        <option key={value} value={value}>{column === DAYS_FILTER ? `${value} ${value === '1' ? 'day' : 'days'}` : value}</option>
-                      ))}
-                    </select>
-                  </label>
-                )
-              })}
-            </div>
-            <div className="filter-results-line"><span>{filteredRows.length.toLocaleString()} matching records</span><span>Filters update charts, KPI cards and all tables</span></div>
+          <section className="filter-toolbar" style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', margin: '4px 0 22px' }}>
+            <label className="filter-search" style={{ flex: '1 1 280px', minWidth: '240px' }}><Search size={17} /><input type="search" placeholder="Search across all columns..." value={search} onChange={event => setSearch(event.target.value)} /></label>
+            <label className="filter-select" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '8px', margin: 0 }}><span style={{ whiteSpace: 'nowrap' }}>Pickup Group</span><select value={groupFilter} onChange={event => setGroupFilter(event.target.value)}><option value="all">All pickup groups</option>{GROUPS.map(group => <option key={group.id} value={group.id}>{group.label}</option>)}</select></label>
+            <label className="filter-select" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '8px', margin: 0 }}><span style={{ whiteSpace: 'nowrap' }}>KPI Status</span><select value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="all">All KPI statuses</option><option value="Within KPI">Within KPI</option><option value="Exception">Exception</option><option value="Major Exception">Major Exception</option><option value="Date Missing">Date Missing</option></select></label>
+            <button className="reset-button" onClick={resetFilters} type="button">Reset all</button>
           </section>
 
           <section className="tables-intro">
@@ -678,13 +696,27 @@ function App() {
           </section>
 
           {GROUPS.map(group => {
-            const groupRows = filteredRows.filter(row => row._group === group.id)
+            const groupRows = rowsByGroup[group.id] || []
             const description = group.id === 'drc'
               ? 'Depart from Country identifies the Democratic Republic of Congo.'
               : group.id === 'reload'
                 ? 'Non-DRC records where Pickup Point: Location Name contains the word Reload.'
                 : 'Non-DRC records where the pickup-point name does not contain Reload.'
-            return <RecordTable key={group.id} sectionId={`table-${group.id}`} title={group.label} description={description} rows={groupRows} onDetails={setSelectedRow} onActionDetails={setSelectedRow} />
+            return (
+              <RecordTable
+                key={group.id}
+                sectionId={`table-${group.id}`}
+                title={group.label}
+                description={description}
+                rows={groupRows}
+                onDetails={setSelectedRow}
+                options={columnOptions}
+                columnFilters={tableFilters[group.id] || {}}
+                onColumnFilter={(column, value) => setTableFilters(current => ({ ...current, [group.id]: { ...current[group.id], [column]: value } }))}
+                statusFilter={statusFilter}
+                onStatusFilter={setStatusFilter}
+              />
+            )
           })}
 
           <section className="overall-action-summary" id="action-summary"><div className="overall-action-icon"><AlertTriangle size={21} /></div><div><h2>Overall Action Needed</h2><p>Major exceptions across all visible pickup groups.</p></div><strong>{counts.major.toLocaleString()}</strong></section>

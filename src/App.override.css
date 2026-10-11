@@ -1,0 +1,63 @@
+/* ===== Sidebar: overlay drawer, dashboard uses the full screen ===== */
+.app-shell { display: block !important; }
+
+.main-area {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.sidebar {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  bottom: 0 !important;
+  height: 100vh !important;
+  width: 290px !important;
+  max-width: 86vw !important;
+  z-index: 1000 !important;
+  overflow-y: auto;
+  transform: translateX(-105%) !important;
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.sidebar.sidebar-open {
+  transform: translateX(0) !important;
+  box-shadow: 10px 0 36px rgba(15, 23, 42, 0.35);
+}
+
+.sidebar-scrim {
+  display: block !important;
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 999 !important;
+  padding: 0;
+  border: 0;
+  background: rgba(15, 23, 42, 0.5) !important;
+  cursor: pointer;
+}
+
+/* Menu button is visible on every screen size and closes from inside the drawer too */
+.mobile-menu,
+.mobile-close {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ===== Full-width content and slightly larger text ===== */
+.dashboard-content {
+  max-width: none !important;
+  width: 100% !important;
+  font-size: 15px;
+}
+
+.page-heading .subtitle { font-size: 16px; }
+.wide-operations-table th { font-size: 13px; vertical-align: top; }
+.wide-operations-table td { font-size: 14px; }
+.records-heading p { font-size: 14px; }
+
+@media print {
+  .sidebar, .sidebar-scrim { display: none !important; }
+}
