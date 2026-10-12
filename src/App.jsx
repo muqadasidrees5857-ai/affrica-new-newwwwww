@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import html2canvas from 'html2canvas'
 import * as XLSX from 'xlsx'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import {
   LayoutDashboard, Truck, Upload, Search, FileSpreadsheet,
   AlertTriangle, CircleCheck, Clock3, Eye, Printer, Camera, ChevronDown,
-  Menu, X, RefreshCw,
+  Menu, X, RefreshCw, ArrowUp, ArrowDown, ArrowUpDown, Maximize2,
 } from 'lucide-react'
 import './App.css'
 import './App.override.css'
@@ -182,8 +183,12 @@ function prepareRow(row, index) {
   }
 }
 
+// Columns shown in the three tables (Internal Comments and Haulier are only shown in the details popup).
+const HIDDEN_TABLE_COLUMNS = ['Last Event: Internal Comments', 'Haulier: Account Name']
+const TABLE_COLUMNS = EXCEL_COLUMNS.filter(column => !HIDDEN_TABLE_COLUMNS.includes(column))
+
 const DAYS_FILTER = 'Days Count'
-const FILTER_COLUMNS = [DAYS_FILTER, ...EXCEL_COLUMNS]
+const FILTER_COLUMNS = [DAYS_FILTER, ...TABLE_COLUMNS]
 const BLANK_OPTION = '__BLANK__'
 
 function filterLabel(column) {
@@ -251,34 +256,365 @@ function GroupKpiChart({ group, rows }) {
 }
 
 const headerSelectStyle = {
-  display: 'block', width: '100%', minWidth: '120px', maxWidth: '220px', marginTop: '6px',
-  padding: '4px 6px', fontSize: '12px', fontWeight: 400, textTransform: 'none', letterSpacing: 'normal',
+  flex: 1, minWidth: 0, width: '100%',
+  padding: '3px 4px', fontSize: '11px', fontWeight: 400, textTransform: 'none', letterSpacing: 'normal',
   color: '#172033', background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer',
 }
 
-// Excel-style dropdown that sits under a table column title.
-function HeaderFilter({ label, value, onChange, list = [], hasBlank = false, formatValue }) {
+const KPI_COLUMN = 'KPI Status'
+const KPI_ORDER = { 'Within KPI': 0, Exception: 1, 'Major Exception': 2, 'Date Missing': 3 }
+
+// Value used to sort a row by a column (null = empty, always sorted last).
+function getSortValue(row, column) {
+  if (column === DAYS_FILTER) return row._days
+  if (column === KPI_COLUMN) return KPI_ORDER[row._kpi] ?? 99
+  if (column.includes('Date')) return getDate(row[column])?.getTime() ?? null
+  const text = clean(row[column])
+  return text === '' ? null : text
+}
+
+function compareRows(a, b, column, direction) {
+  const x = getSortValue(a, column)
+  const y = getSortValue(b, column)
+  if (x === null && y === null) return 0
+  if (x === null) return 1
+  if (y === null) return -1
+  const result = typeof x === 'number'
+    ? x - y
+    : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: 'base' })
+  return direction === 'asc' ? result : -result
+}
+
+// Excel-style dropdown + sort button that sit under a table column title.
+function HeaderFilter({ label, value, onChange, list = [], hasBlank = false, formatValue, sortColumn, sort, onSort }) {
   const items = value && value !== BLANK_OPTION && !list.includes(value) ? [...list, value] : list
+  const direction = sort?.column === sortColumn ? sort.direction : null
+  const SortIcon = direction === 'asc' ? ArrowUp : direction === 'desc' ? ArrowDown : ArrowUpDown
+  const sortTitle = direction === 'asc'
+    ? 'Sorted A → Z / smallest first (click for Z → A)'
+    : direction === 'desc'
+      ? 'Sorted Z → A / largest first (click to clear)'
+      : 'Sort A → Z / smallest first'
+
   return (
-    <select
-      className="header-filter-select"
-      style={headerSelectStyle}
-      value={value || ''}
-      onChange={event => onChange(event.target.value)}
-      aria-label={`Filter by ${label}`}
-    >
-      <option value="">All</option>
-      {hasBlank && <option value={BLANK_OPTION}>(Blank)</option>}
-      {items.map(item => <option key={item} value={item}>{formatValue ? formatValue(item) : item}</option>)}
-    </select>
+    <div className="header-filter-row" style={{ display: 'flex', alignItems: 'center', gap: '3px', marginTop: '6px' }}>
+      {onChange && (
+        <select
+          className="header-filter-select"
+          style={headerSelectStyle}
+          value={value || ''}
+          onChange={event => onChange(event.target.value)}
+          aria-label={`Filter by ${label}`}
+        >
+          <option value="">All</option>
+          {hasBlank && <option value={BLANK_OPTION}>(Blank)</option>}
+          {items.map(item => <option key={item} value={item}>{formatValue ? formatValue(item) : item}</option>)}
+        </select>
+      )}
+      {onSort && (
+        <button
+          type="button"
+          className="header-sort-button"
+          title={sortTitle}
+          aria-label={`Sort by ${label}`}
+          onClick={() => onSort(sortColumn)}
+          style={{
+            flex: 'none', width: '24px', height: '24px', padding: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer',
+            background: direction ? '#e0e7ff' : '#ffffff', color: direction ? '#3730a3' : '#64748b',
+          }}
+        >
+          <SortIcon size={14} />
+        </button>
+      )}
+    </div>
   )
 }
 
+// Column widths (percent of the table) so all 13 columns fit on screen without scrolling.
+// Order: Days Count, the 10 table columns, KPI Status, Details.
+const TABLE_COLUMN_WIDTHS = ['6%', '9%', '7%', '12%', '8%', '8%', '7%', '7%', '7%', '7%', '12%', '7%', '3%']
+
 const KPI_STATUS_LIST = ['Within KPI', 'Exception', 'Major Exception', 'Date Missing']
+
+// Vertical stacked chart: one bar per pickup point, one colour block per transporter (driver).
+// Only Major Exception trucks are counted, and it never changes with the filters.
+const MAJOR_CHART_MAX_HEIGHT = 620 // the plot is never taller than this on the page
+const MAJOR_CHART_MIN_HEIGHT = 380
+
+// Short display name (hover shows the full one): drops LIMITED / LTD / (PTY) endings.
+function shortDriverName(name) {
+  let text = name
+  text = text.replace(/\s+(LIMITED|LTD\.?)\s*$/i, '')
+  text = text.replace(/\s*\(PTY\)\s*$/i, '')
+  text = text.replace(/\s+(LIMITED|LTD\.?)\s*$/i, '')
+  return text.trim() || name
+}
+
+function enterBrowserFullscreen() {
+  const element = document.documentElement
+  if (element.requestFullscreen) {
+    const result = element.requestFullscreen()
+    if (result && result.catch) result.catch(() => {})
+  }
+}
+
+function leaveBrowserFullscreen() {
+  if (document.fullscreenElement && document.exitFullscreen) {
+    const result = document.exitFullscreen()
+    if (result && result.catch) result.catch(() => {})
+  }
+}
+
+function MajorExceptionPickupChart({ rows }) {
+  const model = useMemo(() => {
+    const byPickup = new Map()
+    const driverTotals = new Map()
+    let totalTrucks = 0
+
+    rows.filter(row => row._kpi === 'Major Exception').forEach(row => {
+      const pickup = clean(row['Pickup Point: Location Name']) || '(No pickup point)'
+      const driver = clean(row['Transporter: Account Name']) || '(No transporter)'
+      const reg = clean(row['Horse: Asset No [Reg]'])
+
+      if (!byPickup.has(pickup)) byPickup.set(pickup, { pickup, total: 0, drivers: new Map() })
+      const entry = byPickup.get(pickup)
+      entry.total += 1
+      if (!entry.drivers.has(driver)) entry.drivers.set(driver, { driver, count: 0, regs: [] })
+      const segment = entry.drivers.get(driver)
+      segment.count += 1
+      if (reg) segment.regs.push(reg)
+
+      driverTotals.set(driver, (driverTotals.get(driver) || 0) + 1)
+      totalTrucks += 1
+    })
+
+    // Every driver keeps one colour everywhere.
+    const driverList = [...driverTotals.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([name, total], index) => ({
+        name,
+        total,
+        color: `hsl(${Math.round((index * 137.508) % 360)}, ${55 + (index % 2) * 10}%, ${30 + (index % 3) * 4}%)`,
+      }))
+    const colors = Object.fromEntries(driverList.map(item => [item.name, item.color]))
+
+    const pickups = [...byPickup.values()]
+      .map(entry => ({
+        ...entry,
+        segments: [...entry.drivers.values()].sort((a, b) => b.count - a.count || a.driver.localeCompare(b.driver)),
+      }))
+      .sort((a, b) => b.total - a.total || a.pickup.localeCompare(b.pickup))
+
+    return { pickups, driverList, colors, totalTrucks, maxTotal: pickups[0]?.total || 0 }
+  }, [rows])
+
+  const { pickups, driverList, colors, totalTrucks, maxTotal } = model
+
+  // Full-screen mode: the chart fills the whole screen, with no scrolling in either direction.
+  const [full, setFull] = useState(false)
+  const [viewport, setViewport] = useState(() => ({
+    width: typeof window === 'undefined' ? 1280 : window.innerWidth,
+    height: typeof window === 'undefined' ? 800 : window.innerHeight,
+  }))
+
+  useEffect(() => {
+    if (!full) return undefined
+    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight })
+    const onKey = event => { if (event.key === 'Escape') setFull(false) }
+    const onFullscreenChange = () => { if (!document.fullscreenElement) setFull(false) }
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    onResize()
+    window.addEventListener('resize', onResize)
+    window.addEventListener('keydown', onKey)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('keydown', onKey)
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+    }
+  }, [full])
+
+  function openFull() {
+    setFull(true)
+    enterBrowserFullscreen()
+  }
+
+  function closeFull() {
+    setFull(false)
+    leaveBrowserFullscreen()
+  }
+
+  // The scale always ends on a round number above the tallest bar.
+  const step = maxTotal > 20 ? 5 : maxTotal > 10 ? 2 : 1
+  const niceMax = (Math.floor(maxTotal / step) + 1) * step
+  const ticks = []
+  for (let value = 0; value <= niceMax; value += step) ticks.push(value)
+  const percentOf = value => `${(value / niceMax) * 100}%`
+
+  const pageHeight = Math.max(MAJOR_CHART_MIN_HEIGHT, Math.min(MAJOR_CHART_MAX_HEIGHT, niceMax * 28))
+  const fullHeight = Math.max(240, viewport.height - 195)
+
+  const barsRowStyle = { display: 'flex', justifyContent: 'center', gap: 'clamp(4px, 0.45vw, 9px)', padding: '0 4px' }
+  const columnStyle = { flex: '1 1 0', minWidth: 0, maxWidth: '240px' }
+
+  const renderHeader = isFull => (
+    <div
+      className={isFull ? undefined : 'panel-heading'}
+      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', padding: '0 10px' }}
+    >
+      <div>
+        <h2 style={isFull ? { margin: 0, fontSize: '20px' } : undefined}>Major Exception Trucks by Pickup Point</h2>
+        {!isFull && <p>Each bar is a pickup point. Each colour block is one transporter (driver): the number is how many of its trucks are in Major Exception there.</p>}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
+          <span className="mpc-chip">{totalTrucks.toLocaleString()} Major Exception trucks</span>
+          <span className="mpc-chip mpc-chip-neutral">{pickups.length.toLocaleString()} pickup points</span>
+          <span className="mpc-chip mpc-chip-neutral">{driverList.length.toLocaleString()} transporters</span>
+        </div>
+      </div>
+      {pickups.length > 0 && (
+        isFull ? (
+          <button className="secondary-button" type="button" onClick={closeFull} title="Close full screen (Esc)"><X size={16} /> Exit Full Screen</button>
+        ) : (
+          <button className="secondary-button" type="button" onClick={openFull} title="Show the whole chart on one screen"><Maximize2 size={16} /> Full Screen</button>
+        )
+      )}
+    </div>
+  )
+
+  const renderPlot = (plotHeight, isFull) => (
+    <div className={isFull ? undefined : 'mpc-scroll'} style={{ marginTop: '14px' }}>
+      <div className={isFull ? undefined : 'mpc-inner'} style={{ display: 'flex', gap: '4px' }}>
+        {/* Y axis */}
+        <div style={{ position: 'relative', flex: 'none', width: '26px', height: `${plotHeight}px` }}>
+          {ticks.map(tick => (
+            <span key={tick} style={{ position: 'absolute', right: 0, bottom: percentOf(tick), transform: 'translateY(50%)', fontSize: '11px', color: '#64748b', fontVariantNumeric: 'tabular-nums' }}>{tick}</span>
+          ))}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {/* Plot */}
+          <div style={{ position: 'relative', height: `${plotHeight}px`, borderBottom: '2px solid #94a3b8' }}>
+            {ticks.slice(1).map(tick => (
+              <div key={tick} style={{ position: 'absolute', left: 0, right: 0, bottom: percentOf(tick), borderTop: '1px dashed #e2e8f0' }} />
+            ))}
+
+            <div style={{ ...barsRowStyle, position: 'absolute', inset: 0, alignItems: 'flex-end' }}>
+              {pickups.map(entry => (
+                <div key={entry.pickup} style={{ ...columnStyle, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+                  <strong style={{ flex: 'none', textAlign: 'center', fontSize: '16px', lineHeight: '24px', color: '#172033' }}>{entry.total}</strong>
+                  <div style={{ flex: 'none', height: percentOf(entry.total), display: 'flex', flexDirection: 'column-reverse', borderRadius: '8px 8px 0 0', overflow: 'hidden', boxShadow: '0 3px 10px rgba(15, 23, 42, 0.14)' }}>
+                    {entry.segments.map(segment => {
+                      const heightPx = (segment.count / niceMax) * plotHeight
+                      const lines = Math.max(1, Math.floor((heightPx - 3) / 12))
+                      const hint = `${segment.driver}\n${segment.count} truck${segment.count > 1 ? 's' : ''} at ${entry.pickup}${segment.regs.length ? `\nTrucks: ${segment.regs.join(', ')}` : ''}`
+                      return (
+                        <div
+                          key={segment.driver}
+                          className="mpc-seg"
+                          title={hint}
+                          style={{
+                            flex: `${segment.count} 1 0`, minHeight: 0, boxSizing: 'border-box', padding: '0 3px', background: colors[segment.driver],
+                            borderTop: '2px solid #ffffff', color: '#ffffff', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px', overflow: 'hidden',
+                          }}
+                        >
+                          <span style={{ width: '100%', textAlign: 'center', fontSize: '11px', lineHeight: '12px', fontWeight: 600, textShadow: '0 1px 1px rgba(0, 0, 0, 0.35)', overflow: 'hidden', ...(lines === 1 ? { display: 'block', whiteSpace: 'nowrap', textOverflow: 'ellipsis' } : { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: lines, wordBreak: 'break-word' }) }}>
+                            <b style={{ fontSize: '12px' }}>{segment.count}</b> · {shortDriverName(segment.driver)}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Pickup point names */}
+          <div style={{ ...barsRowStyle, alignItems: 'flex-start' }}>
+            {pickups.map(entry => (
+              <div
+                key={entry.pickup}
+                title={entry.pickup}
+                style={{ ...columnStyle, paddingTop: '10px', textAlign: 'center', fontSize: '11.5px', fontWeight: 600, lineHeight: 1.3, color: '#334155', wordBreak: 'break-word', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: isFull ? 3 : 4, overflow: 'hidden' }}
+              >
+                {entry.pickup}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+
+  return (
+    <article className="panel major-pickup-panel" style={{ padding: '16px 6px 14px', marginBottom: '20px', minWidth: 0 }}>
+      <style>{`
+        .mpc-seg { transition: filter 120ms ease; cursor: default; }
+        .mpc-seg:hover { filter: brightness(1.18); }
+        .mpc-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 13px; font-weight: 600; }
+        .mpc-chip-neutral { background: #f1f5f9; color: #334155; }
+        @media (max-width: 900px) {
+          .mpc-scroll { overflow-x: auto; }
+          .mpc-inner { min-width: 780px; }
+        }
+      `}</style>
+
+      {renderHeader(false)}
+
+      {pickups.length === 0 ? (
+        <p style={{ margin: '24px 0 8px', textAlign: 'center', fontSize: '14px', color: 'var(--text-secondary, #64748b)' }}>No Major Exception trucks to show.</p>
+      ) : renderPlot(pageHeight, false)}
+
+      {full && pickups.length > 0 && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Major Exception trucks by pickup point, full screen"
+          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '10px 8px 8px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+        >
+          {renderHeader(true)}
+          {renderPlot(fullHeight, true)}
+        </div>,
+        document.body
+      )}
+    </article>
+  )
+}
 
 function RecordTable({ sectionId, title, description, rows, onDetails, options, columnFilters, onColumnFilter, statusFilter, onStatusFilter }) {
   const [expanded, setExpanded] = useState(false)
-  const visibleRows = expanded ? rows : rows.slice(0, 8)
+  const [fullScreen, setFullScreen] = useState(false)
+  const [sort, setSort] = useState(null)
+
+  useEffect(() => {
+    if (!fullScreen) return undefined
+    const previousOverflow = document.body.style.overflow
+    const onKeyDown = event => {
+      if (event.key === 'Escape') setFullScreen(false)
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [fullScreen])
+  const sortedRows = useMemo(
+    () => (sort ? [...rows].sort((a, b) => compareRows(a, b, sort.column, sort.direction)) : rows),
+    [rows, sort]
+  )
+  const visibleRows = expanded ? sortedRows : sortedRows.slice(0, 8)
+
+  // Click cycle for a column: ascending -> descending -> no sorting.
+  function toggleSort(column) {
+    setSort(current => {
+      if (!current || current.column !== column) return { column, direction: 'asc' }
+      return current.direction === 'asc' ? { column, direction: 'desc' } : null
+    })
+  }
 
   async function downloadFullTableScreenshot() {
     const wasExpanded = expanded
@@ -299,7 +635,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
 
       // Capture an isolated copy outside the dashboard's scroll/overflow containers.
       const tableClone = sourceTable.cloneNode(true)
-      tableClone.querySelectorAll('select').forEach(element => element.remove())
+      tableClone.querySelectorAll('.header-filter-row').forEach(element => element.remove())
       tableClone.querySelectorAll('th').forEach(th => {
         th.style.position = 'static'
         th.style.top = 'auto'
@@ -359,13 +695,38 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
   }
 
   return (
-    <section className="records-section" id={sectionId}>
+    <section
+      className="records-section"
+      id={sectionId}
+      style={fullScreen ? {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 4000,
+        width: '100vw',
+        height: '100vh',
+        maxHeight: '100vh',
+        overflow: 'auto',
+        boxSizing: 'border-box',
+        padding: '18px',
+        margin: 0,
+        background: '#f5f7fb',
+      } : undefined}
+    >
       <div className="records-heading">
         <div>
           <div className="records-title-row"><h2>{title}</h2><span className="record-count">{rows.length.toLocaleString()} records</span></div>
           <p>{description}</p>
         </div>
         <div className="records-heading-actions">
+          {fullScreen ? (
+            <button className="secondary-button" onClick={() => setFullScreen(false)} type="button" title="Close full screen (Esc)">
+              <X size={16} /> Exit Full Screen
+            </button>
+          ) : (
+            <button className="secondary-button" onClick={() => setFullScreen(true)} type="button" title="Show this table on the full screen">
+              <Maximize2 size={16} /> Full Screen
+            </button>
+          )}
           <button className="table-screenshot-button" onClick={downloadFullTableScreenshot} type="button" title="Download only this table as a PNG, including every row">
             <Camera size={15} /> Table Only PNG
           </button>
@@ -378,6 +739,9 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
 
       <div className="table-wrap full-columns-table-wrap">
         <table className="wide-operations-table">
+          <colgroup>
+            {TABLE_COLUMN_WIDTHS.map((width, index) => <col key={index} style={{ width }} />)}
+          </colgroup>
           <thead><tr>
             <th className="days-count-th">
               Days Count (Today − Reporting Date)
@@ -388,9 +752,12 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
                 list={options[DAYS_FILTER]?.list}
                 hasBlank={options[DAYS_FILTER]?.hasBlank}
                 formatValue={value => `${value} ${value === '1' ? 'day' : 'days'}`}
+                sortColumn={DAYS_FILTER}
+                sort={sort}
+                onSort={toggleSort}
               />
             </th>
-            {EXCEL_COLUMNS.map(column => (
+            {TABLE_COLUMNS.map(column => (
               <th key={column}>
                 {column}
                 <HeaderFilter
@@ -399,6 +766,9 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
                   onChange={value => onColumnFilter(column, value)}
                   list={options[column]?.list}
                   hasBlank={options[column]?.hasBlank}
+                  sortColumn={column}
+                  sort={sort}
+                  onSort={toggleSort}
                 />
               </th>
             ))}
@@ -409,6 +779,9 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
                 value={statusFilter === 'all' ? '' : statusFilter}
                 onChange={value => onStatusFilter(value || 'all')}
                 list={KPI_STATUS_LIST}
+                sortColumn={KPI_COLUMN}
+                sort={sort}
+                onSort={toggleSort}
               />
             </th>
             <th>Details</th>
@@ -419,7 +792,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
                 <td className="days-count-cell" style={{ fontWeight: 700, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
                   {row._days === null ? '—' : `${row._days} ${row._days === 1 ? 'day' : 'days'}`}
                 </td>
-                {EXCEL_COLUMNS.map(column => (
+                {TABLE_COLUMNS.map(column => (
                   <td key={column} className={column === 'Delivery Number' ? 'delivery-cell' : column === 'Pickup Point: Location Name' ? 'pickup-cell' : ''} title={clean(row[column])}>
                     {column.includes('Date') ? formatDate(row[column]) : clean(row[column]) || '—'}
                   </td>
@@ -561,9 +934,6 @@ function App() {
     return [group.id, groupRows]
   })), [baseRows, tableFilters])
 
-  // KPI cards and the overall chart count whatever the three tables currently show.
-  const filteredRows = useMemo(() => GROUPS.flatMap(group => rowsByGroup[group.id]), [rowsByGroup])
-
   // Dropdown options: every distinct value found in the whole uploaded file (all countries, all pickup points...).
   const columnOptions = useMemo(() => {
     const result = {}
@@ -584,13 +954,14 @@ function App() {
     return result
   }, [currentRows])
 
+  // Overall numbers (KPI cards + Overall Performance chart) always cover ALL records, whatever filters are set.
   const counts = useMemo(() => ({
-    total: filteredRows.length,
-    within: filteredRows.filter(row => row._kpi === 'Within KPI').length,
-    exception: filteredRows.filter(row => row._kpi === 'Exception').length,
-    major: filteredRows.filter(row => row._kpi === 'Major Exception').length,
-    missingDate: filteredRows.filter(row => row._kpi === 'Date Missing').length,
-  }), [filteredRows])
+    total: currentRows.length,
+    within: currentRows.filter(row => row._kpi === 'Within KPI').length,
+    exception: currentRows.filter(row => row._kpi === 'Exception').length,
+    major: currentRows.filter(row => row._kpi === 'Major Exception').length,
+    missingDate: currentRows.filter(row => row._kpi === 'Date Missing').length,
+  }), [currentRows])
 
   const pieData = [
     { name: 'Within KPI', value: counts.within },
@@ -646,7 +1017,7 @@ function App() {
           <div className="scope-note"><Clock3 size={17} /><span>Current view: <strong>Waiting To Load + Waiting for Documents</strong>.</span></div>
 
           <section className="summary-grid">
-            <SummaryCard icon={Truck} title="All Truck Performance" value={counts.total} note="Filtered operational records" color="navy" />
+            <SummaryCard icon={Truck} title="All Truck Performance" value={counts.total} note="All operational records" color="navy" />
             <SummaryCard icon={CircleCheck} title="Within KPI" value={counts.within} note="Within target" color="green" />
             <SummaryCard icon={Clock3} title="Exception" value={counts.exception} note="Needs attention" color="orange" />
             <SummaryCard icon={AlertTriangle} title="Major Exception" value={counts.major} note="Action required" color="red" />
@@ -669,16 +1040,18 @@ function App() {
                 <div className="pie-center"><strong>{counts.total.toLocaleString()}</strong><span>Total Records</span></div>
               </div>
               <div className="chart-legend">
-                {pieData.map(item => <div className="legend-item" key={item.name}><span className="legend-dot" style={{ background: COLORS[item.name] }} /><span>{item.name}</span><strong>{counts.total ? ((item.value / counts.total) * 100).toFixed(1) : '0.0'}%</strong></div>)}
+                {pieData.map(item => <div className="legend-item" key={item.name}><span className="legend-dot" style={{ background: COLORS[item.name], width: '14px', height: '14px' }} /><span style={{ fontSize: '17px' }}>{item.name}</span><strong style={{ fontSize: '24px' }}>{counts.total ? ((item.value / counts.total) * 100).toFixed(1) : '0.0'}%</strong></div>)}
               </div>
             </article>
           </section>
 
           <section aria-label="KPI performance by pickup group" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '18px', marginTop: '20px', marginBottom: '24px' }}>
             {GROUPS.map(group => (
-              <GroupKpiChart key={group.id} group={group.id} rows={rowsByGroup[group.id] || []} />
+              <GroupKpiChart key={group.id} group={group.id} rows={currentRows.filter(row => row._group === group.id)} />
             ))}
           </section>
+
+          <MajorExceptionPickupChart rows={currentRows} />
 
           <section className="filter-toolbar" style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', margin: '4px 0 22px' }}>
             <label className="filter-search" style={{ flex: '1 1 280px', minWidth: '240px' }}><Search size={17} /><input type="search" placeholder="Search across all columns..." value={search} onChange={event => setSearch(event.target.value)} /></label>

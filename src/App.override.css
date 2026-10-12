@@ -4,6 +4,7 @@
 .main-area {
   margin-left: 0 !important;
   padding-left: 0 !important;
+  padding-right: 0 !important;
   width: 100% !important;
   max-width: none !important;
 }
@@ -38,7 +39,6 @@
   cursor: pointer;
 }
 
-/* Menu button is visible on every screen size and closes from inside the drawer too */
 .mobile-menu,
 .mobile-close {
   display: inline-flex !important;
@@ -46,17 +46,91 @@
   justify-content: center;
 }
 
-/* ===== Full-width content and slightly larger text ===== */
+/* ===== Full width: only 3px margin on the left and right ===== */
 .dashboard-content {
   max-width: none !important;
   width: 100% !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 3px !important;
+  padding-right: 3px !important;
   font-size: 15px;
 }
 
 .page-heading .subtitle { font-size: 16px; }
-.wide-operations-table th { font-size: 13px; vertical-align: top; }
-.wide-operations-table td { font-size: 14px; }
 .records-heading p { font-size: 14px; }
+
+/* ===== Tables: fit the whole table on the screen, no scrolling ===== */
+.dashboard-content .table-wrap,
+.dashboard-content .full-columns-table-wrap {
+  overflow: visible !important;
+  max-height: none !important;
+  height: auto !important;
+}
+
+.dashboard-content .wide-operations-table {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  table-layout: fixed !important;
+}
+
+.dashboard-content .wide-operations-table th,
+.dashboard-content .wide-operations-table td {
+  position: static !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  width: auto;
+  padding: 7px 5px !important;
+  font-size: clamp(11px, 0.72vw, 14px) !important;
+  line-height: 1.35;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.dashboard-content .wide-operations-table th {
+  font-size: clamp(10.5px, 0.68vw, 13px) !important;
+  font-weight: 700 !important;
+  text-align: left;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  vertical-align: bottom !important;
+  padding: 8px 4px !important;
+}
+
+.dashboard-content .wide-operations-table .status-badge {
+  white-space: normal !important;
+  max-width: 100%;
+}
+
+/* Table sections: no side padding/margin around the table itself */
+.dashboard-content .records-section {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+.dashboard-content .records-section .records-heading {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.dashboard-content .records-section .table-wrap,
+.dashboard-content .records-section .full-columns-table-wrap {
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+}
+
+/* Very small screens cannot fit 15 columns: allow sideways scrolling there only */
+@media (max-width: 1000px) {
+  .dashboard-content .table-wrap,
+  .dashboard-content .full-columns-table-wrap { overflow-x: auto !important; }
+  .dashboard-content .wide-operations-table { min-width: 1100px !important; }
+}
 
 @media print {
   .sidebar, .sidebar-scrim { display: none !important; }
