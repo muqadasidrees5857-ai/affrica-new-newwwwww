@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import html2canvas from 'html2canvas'
 import * as XLSX from 'xlsx'
@@ -337,20 +337,6 @@ const TABLE_COLUMN_WIDTHS = ['6%', '9%', '7%', '12%', '8%', '8%', '7%', '7%', '7
 
 const KPI_STATUS_LIST = ['Within KPI', 'Exception', 'Major Exception', 'Date Missing']
 
-// Vertical stacked chart: one bar per pickup point, one colour block per transporter (driver).
-// Only Major Exception trucks are counted, and it never changes with the filters.
-const MAJOR_CHART_MAX_HEIGHT = 620 // the plot is never taller than this on the page
-const MAJOR_CHART_MIN_HEIGHT = 380
-
-// Short display name (hover shows the full one): drops LIMITED / LTD / (PTY) endings.
-function shortDriverName(name) {
-  let text = name
-  text = text.replace(/\s+(LIMITED|LTD\.?)\s*$/i, '')
-  text = text.replace(/\s*\(PTY\)\s*$/i, '')
-  text = text.replace(/\s+(LIMITED|LTD\.?)\s*$/i, '')
-  return text.trim() || name
-}
-
 function enterBrowserFullscreen() {
   const element = document.documentElement
   if (element.requestFullscreen) {
@@ -366,247 +352,372 @@ function leaveBrowserFullscreen() {
   }
 }
 
-function MajorExceptionPickupChart({ rows }) {
-  const model = useMemo(() => {
-    const byPickup = new Map()
-    const driverTotals = new Map()
-    let totalTrucks = 0
+/* ------------------------------------------------------------------
+   MAJOR EXCEPTION — CLIENT-WISE STANDING BARS
+   One card per pickup point. Inside each card every client account has
+   its own vertical bar (all bars in a chart share one scale), with the
+   truck count on top and the client name written under the bar.
+   A single Full Screen button above the three charts opens all three
+   groups together on one screen, auto-sized so nothing needs scrolling.
+   Only Major Exception trucks are counted; it never changes with filters.
+------------------------------------------------------------------ */
+const MAX_PICKUPS = 6
 
-    rows.filter(row => row._kpi === 'Major Exception').forEach(row => {
+const CLIENT_COLORS = [
+  '#2563eb', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4',
+  '#f97316', '#84cc16', '#6366f1', '#14b8a6', '#e11d48', '#a16207',
+  '#0ea5e9', '#7c3aed', '#65a30d', '#db2777',
+]
+
+const NORMAL_DIMS = { plotHeight: 100, colWidth: 66, barWidth: 30, nameSize: 10, countSize: 12, scale: 1 }
+
+function buildMajorModel(rows, group) {
+  const byPickup = new Map()
+  const clientTotals = new Map()
+
+  rows
+    .filter(row => row._group === group && row._kpi === 'Major Exception')
+    .forEach(row => {
       const pickup = clean(row['Pickup Point: Location Name']) || '(No pickup point)'
-      const driver = clean(row['Transporter: Account Name']) || '(No transporter)'
-      const reg = clean(row['Horse: Asset No [Reg]'])
-
-      if (!byPickup.has(pickup)) byPickup.set(pickup, { pickup, total: 0, drivers: new Map() })
-      const entry = byPickup.get(pickup)
-      entry.total += 1
-      if (!entry.drivers.has(driver)) entry.drivers.set(driver, { driver, count: 0, regs: [] })
-      const segment = entry.drivers.get(driver)
-      segment.count += 1
-      if (reg) segment.regs.push(reg)
-
-      driverTotals.set(driver, (driverTotals.get(driver) || 0) + 1)
-      totalTrucks += 1
+      const client = clean(row['Client: Account Name']) || '(No client account name)'
+      if (!byPickup.has(pickup)) byPickup.set(pickup, { pickup, total: 0, clients: new Map() })
+      const pickupEntry = byPickup.get(pickup)
+      pickupEntry.total += 1
+      if (!pickupEntry.clients.has(client)) pickupEntry.clients.set(client, { client, count: 0 })
+      pickupEntry.clients.get(client).count += 1
+      clientTotals.set(client, (clientTotals.get(client) || 0) + 1)
     })
 
-    // Every driver keeps one colour everywhere.
-    const driverList = [...driverTotals.entries()]
+  // The same client keeps the same colour in every pickup card (biggest client first).
+  const colorByClient = new Map(
+    [...clientTotals.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([name, total], index) => ({
-        name,
-        total,
-        color: `hsl(${Math.round((index * 137.508) % 360)}, ${55 + (index % 2) * 10}%, ${30 + (index % 3) * 4}%)`,
-      }))
-    const colors = Object.fromEntries(driverList.map(item => [item.name, item.color]))
-
-    const pickups = [...byPickup.values()]
-      .map(entry => ({
-        ...entry,
-        segments: [...entry.drivers.values()].sort((a, b) => b.count - a.count || a.driver.localeCompare(b.driver)),
-      }))
-      .sort((a, b) => b.total - a.total || a.pickup.localeCompare(b.pickup))
-
-    return { pickups, driverList, colors, totalTrucks, maxTotal: pickups[0]?.total || 0 }
-  }, [rows])
-
-  const { pickups, driverList, colors, totalTrucks, maxTotal } = model
-
-  // Full-screen mode: the chart fills the whole screen, with no scrolling in either direction.
-  const [full, setFull] = useState(false)
-  const [viewport, setViewport] = useState(() => ({
-    width: typeof window === 'undefined' ? 1280 : window.innerWidth,
-    height: typeof window === 'undefined' ? 800 : window.innerHeight,
-  }))
-
-  useEffect(() => {
-    if (!full) return undefined
-    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight })
-    const onKey = event => { if (event.key === 'Escape') setFull(false) }
-    const onFullscreenChange = () => { if (!document.fullscreenElement) setFull(false) }
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    onResize()
-    window.addEventListener('resize', onResize)
-    window.addEventListener('keydown', onKey)
-    document.addEventListener('fullscreenchange', onFullscreenChange)
-    return () => {
-      document.body.style.overflow = previousOverflow
-      window.removeEventListener('resize', onResize)
-      window.removeEventListener('keydown', onKey)
-      document.removeEventListener('fullscreenchange', onFullscreenChange)
-    }
-  }, [full])
-
-  function openFull() {
-    setFull(true)
-    enterBrowserFullscreen()
-  }
-
-  function closeFull() {
-    setFull(false)
-    leaveBrowserFullscreen()
-  }
-
-  // The scale always ends on a round number above the tallest bar.
-  const step = maxTotal > 20 ? 5 : maxTotal > 10 ? 2 : 1
-  const niceMax = (Math.floor(maxTotal / step) + 1) * step
-  const ticks = []
-  for (let value = 0; value <= niceMax; value += step) ticks.push(value)
-  const percentOf = value => `${(value / niceMax) * 100}%`
-
-  const pageHeight = Math.max(MAJOR_CHART_MIN_HEIGHT, Math.min(MAJOR_CHART_MAX_HEIGHT, niceMax * 28))
-  const fullHeight = Math.max(240, viewport.height - 195)
-
-  const barsRowStyle = { display: 'flex', justifyContent: 'center', gap: 'clamp(4px, 0.45vw, 9px)', padding: '0 4px' }
-  const columnStyle = { flex: '1 1 0', minWidth: 0, maxWidth: '240px' }
-
-  const renderHeader = isFull => (
-    <div
-      className={isFull ? undefined : 'panel-heading'}
-      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', padding: '0 10px' }}
-    >
-      <div>
-        <h2 style={isFull ? { margin: 0, fontSize: '20px' } : undefined}>Major Exception Trucks by Pickup Point</h2>
-        {!isFull && <p>Each bar is a pickup point. Each colour block is one transporter (driver): the number is how many of its trucks are in Major Exception there.</p>}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
-          <span className="mpc-chip">{totalTrucks.toLocaleString()} Major Exception trucks</span>
-          <span className="mpc-chip mpc-chip-neutral">{pickups.length.toLocaleString()} pickup points</span>
-          <span className="mpc-chip mpc-chip-neutral">{driverList.length.toLocaleString()} transporters</span>
-        </div>
-      </div>
-      {pickups.length > 0 && (
-        isFull ? (
-          <button className="secondary-button" type="button" onClick={closeFull} title="Close full screen (Esc)"><X size={16} /> Exit Full Screen</button>
-        ) : (
-          <button className="secondary-button" type="button" onClick={openFull} title="Show the whole chart on one screen"><Maximize2 size={16} /> Full Screen</button>
-        )
-      )}
-    </div>
+      .map(([client], index) => [client, CLIENT_COLORS[index % CLIENT_COLORS.length]])
   )
 
-  const renderPlot = (plotHeight, isFull) => (
-    <div className={isFull ? undefined : 'mpc-scroll'} style={{ marginTop: '14px' }}>
-      <div className={isFull ? undefined : 'mpc-inner'} style={{ display: 'flex', gap: '4px' }}>
-        {/* Y axis */}
-        <div style={{ position: 'relative', flex: 'none', width: '26px', height: `${plotHeight}px` }}>
-          {ticks.map(tick => (
-            <span key={tick} style={{ position: 'absolute', right: 0, bottom: percentOf(tick), transform: 'translateY(50%)', fontSize: '11px', color: '#64748b', fontVariantNumeric: 'tabular-nums' }}>{tick}</span>
-          ))}
-        </div>
+  const pickups = [...byPickup.values()]
+    .map(item => ({
+      name: item.pickup,
+      total: item.total,
+      clients: [...item.clients.values()]
+        .sort((a, b) => b.count - a.count || a.client.localeCompare(b.client))
+        .map(entry => ({ ...entry, color: colorByClient.get(entry.client) })),
+    }))
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name))
 
-        <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Plot */}
-          <div style={{ position: 'relative', height: `${plotHeight}px`, borderBottom: '2px solid #94a3b8' }}>
-            {ticks.slice(1).map(tick => (
-              <div key={tick} style={{ position: 'absolute', left: 0, right: 0, bottom: percentOf(tick), borderTop: '1px dashed #e2e8f0' }} />
-            ))}
+  const totalTrucks = pickups.reduce((sum, item) => sum + item.total, 0)
+  return { pickups, totalTrucks, clientCount: clientTotals.size }
+}
 
-            <div style={{ ...barsRowStyle, position: 'absolute', inset: 0, alignItems: 'flex-end' }}>
-              {pickups.map(entry => (
-                <div key={entry.pickup} style={{ ...columnStyle, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-                  <strong style={{ flex: 'none', textAlign: 'center', fontSize: '16px', lineHeight: '24px', color: '#172033' }}>{entry.total}</strong>
-                  <div style={{ flex: 'none', height: percentOf(entry.total), display: 'flex', flexDirection: 'column-reverse', borderRadius: '8px 8px 0 0', overflow: 'hidden', boxShadow: '0 3px 10px rgba(15, 23, 42, 0.14)' }}>
-                    {entry.segments.map(segment => {
-                      const heightPx = (segment.count / niceMax) * plotHeight
-                      const lines = Math.max(1, Math.floor((heightPx - 3) / 12))
-                      const hint = `${segment.driver}\n${segment.count} truck${segment.count > 1 ? 's' : ''} at ${entry.pickup}${segment.regs.length ? `\nTrucks: ${segment.regs.join(', ')}` : ''}`
-                      return (
-                        <div
-                          key={segment.driver}
-                          className="mpc-seg"
-                          title={hint}
-                          style={{
-                            flex: `${segment.count} 1 0`, minHeight: 0, boxSizing: 'border-box', padding: '0 3px', background: colors[segment.driver],
-                            borderTop: '2px solid #ffffff', color: '#ffffff', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px', overflow: 'hidden',
-                          }}
-                        >
-                          <span style={{ width: '100%', textAlign: 'center', fontSize: '11px', lineHeight: '12px', fontWeight: 600, textShadow: '0 1px 1px rgba(0, 0, 0, 0.35)', overflow: 'hidden', ...(lines === 1 ? { display: 'block', whiteSpace: 'nowrap', textOverflow: 'ellipsis' } : { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: lines, wordBreak: 'break-word' }) }}>
-                            <b style={{ fontSize: '12px' }}>{segment.count}</b> · {shortDriverName(segment.driver)}
-                          </span>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
+function ClientBarCards({ pickups, dims, isFull }) {
+  const { plotHeight, colWidth, barWidth, nameSize, countSize, scale } = dims
+  const maxCount = Math.max(1, ...pickups.flatMap(pickup => pickup.clients.map(client => client.count)))
+
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: isFull ? '12px' : '10px', alignItems: 'stretch' }}>
+      {pickups.map((pickup, index) => (
+        <section
+          key={pickup.name}
+          style={{
+            flex: `1 1 ${Math.max(isFull ? 150 * scale : 150, pickup.clients.length * (colWidth + 6) + (isFull ? 28 : 24))}px`,
+            minWidth: 0, border: '1px solid #dfe6ef', borderRadius: '10px', background: '#ffffff',
+            padding: isFull ? '10px 12px' : '8px 10px', boxSizing: 'border-box',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+            <h3 style={{ margin: 0, fontSize: isFull ? `${Math.max(10.5, 14 * scale)}px` : '11.5px', lineHeight: 1.25, color: '#172033', overflowWrap: 'anywhere' }}>
+              {index + 1}. {pickup.name}
+            </h3>
+            <span style={{ flex: 'none', padding: '1px 8px', borderRadius: '999px', background: '#fef2f2', color: '#b91c1c', fontSize: isFull ? `${Math.max(9, 12 * scale)}px` : '10px', fontWeight: 700 }}>
+              {pickup.total} {pickup.total === 1 ? 'truck' : 'trucks'}
+            </span>
           </div>
 
-          {/* Pickup point names */}
-          <div style={{ ...barsRowStyle, alignItems: 'flex-start' }}>
-            {pickups.map(entry => (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-end', gap: '6px', height: `${plotHeight + countSize + 12}px`, borderBottom: '1px solid #cbd5e1' }}>
+            {pickup.clients.map(client => {
+              const barHeight = Math.max(6, (client.count / maxCount) * plotHeight)
+              return (
+                <div key={client.client} style={{ width: `${colWidth}px`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                  <strong style={{ fontSize: `${countSize}px`, lineHeight: 1.1, marginBottom: '3px', color: '#172033', fontVariantNumeric: 'tabular-nums' }}>{client.count}</strong>
+                  <div
+                    title={`${client.client}: ${client.count} ${client.count === 1 ? 'truck' : 'trucks'}`}
+                    style={{ width: `${barWidth}px`, height: `${barHeight}px`, background: client.color, borderRadius: '6px 6px 2px 2px' }}
+                  />
+                </div>
+              )
+            })}
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: '6px', marginTop: '5px' }}>
+            {pickup.clients.map(client => (
               <div
-                key={entry.pickup}
-                title={entry.pickup}
-                style={{ ...columnStyle, paddingTop: '10px', textAlign: 'center', fontSize: '11.5px', fontWeight: 600, lineHeight: 1.3, color: '#334155', wordBreak: 'break-word', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: isFull ? 3 : 4, overflow: 'hidden' }}
+                key={client.client}
+                title={client.client}
+                style={{
+                  width: `${colWidth}px`, textAlign: 'center', fontSize: `${nameSize}px`, lineHeight: 1.2, fontWeight: 600, color: '#334155',
+                  overflowWrap: 'anywhere', overflow: 'hidden', maxHeight: `${nameSize * 1.2 * 3 + 2}px`,
+                  display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                }}
               >
-                {entry.pickup}
+                {client.client}
               </div>
             ))}
           </div>
-        </div>
-      </div>
+        </section>
+      ))}
     </div>
   )
+}
 
+// One normal-view panel (no scrolling, top pickup points only) with its OWN Full Screen button.
+function MajorExceptionPickupChart({ model, title, onFullScreen }) {
+  const { pickups, totalTrucks, clientCount } = model
   return (
-    <article className="panel major-pickup-panel" style={{ padding: '16px 6px 14px', marginBottom: '20px', minWidth: 0 }}>
-      <style>{`
-        .mpc-seg { transition: filter 120ms ease; cursor: default; }
-        .mpc-seg:hover { filter: brightness(1.18); }
-        .mpc-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 13px; font-weight: 600; }
-        .mpc-chip-neutral { background: #f1f5f9; color: #334155; }
-        @media (max-width: 900px) {
-          .mpc-scroll { overflow-x: auto; }
-          .mpc-inner { min-width: 780px; }
-        }
-      `}</style>
-
-      {renderHeader(false)}
+    <article className="panel major-pickup-panel" style={{ padding: '8px 10px', marginBottom: '8px', minWidth: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', flexWrap: 'wrap' }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: '22px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title} — Major Exceptions</h2>
+          <p style={{ margin: '2px 0 6px', color: '#64748b', fontSize: '11px' }}>
+            Each bar is one client account at that pickup point.
+          </p>
+          <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+            <span className="mpc-chip">{totalTrucks.toLocaleString()} Major Exception trucks</span>
+            <span className="mpc-chip mpc-chip-neutral">{pickups.length.toLocaleString()} pickup points</span>
+            <span className="mpc-chip mpc-chip-neutral">{clientCount.toLocaleString()} clients</span>
+          </div>
+        </div>
+        {pickups.length > 0 && (
+          <button className="secondary-button" type="button" onClick={onFullScreen} title={`Open ${title} in full screen`}>
+            <Maximize2 size={13} /> Full Screen
+          </button>
+        )}
+      </div>
 
       {pickups.length === 0 ? (
-        <p style={{ margin: '24px 0 8px', textAlign: 'center', fontSize: '14px', color: 'var(--text-secondary, #64748b)' }}>No Major Exception trucks to show.</p>
-      ) : renderPlot(pageHeight, false)}
-
-      {full && pickups.length > 0 && createPortal(
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Major Exception trucks by pickup point, full screen"
-          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '10px 8px 8px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
-        >
-          {renderHeader(true)}
-          {renderPlot(fullHeight, true)}
-        </div>,
-        document.body
+        <p style={{ margin: '10px 0 4px', textAlign: 'center', fontSize: '12px', color: '#64748b' }}>
+          No Major Exception trucks in this group.
+        </p>
+      ) : (
+        <div style={{ marginTop: '8px' }}>
+          <ClientBarCards pickups={pickups.slice(0, MAX_PICKUPS)} dims={NORMAL_DIMS} isFull={false} />
+          {pickups.length > MAX_PICKUPS && (
+            <p style={{ margin: '6px 0 0', textAlign: 'center', fontSize: '10px', color: '#64748b' }}>
+              Top {MAX_PICKUPS} pickup points shown · +{pickups.length - MAX_PICKUPS} more in Full Screen
+            </p>
+          )}
+        </div>
       )}
     </article>
   )
 }
 
-function RecordTable({ sectionId, title, description, rows, onDetails, options, columnFilters, onColumnFilter, statusFilter, onStatusFilter }) {
-  const [expanded, setExpanded] = useState(false)
-  const [fullScreen, setFullScreen] = useState(false)
-  const [sort, setSort] = useState(null)
+// The three charts. Every chart has its own Full Screen button (shows only that group),
+// and there is also one button on top that opens all three groups together.
+function MajorExceptionSection({ rows }) {
+  const models = useMemo(
+    () => GROUPS.map(group => ({ ...group, ...buildMajorModel(rows, group.id) })),
+    [rows]
+  )
+  const grandTotal = models.reduce((sum, item) => sum + item.totalTrucks, 0)
+  // fullMode: null = closed, 'all' = all three groups, or one group id ('drc' / 'reload' / 'third').
+  const [fullMode, setFullMode] = useState(null)
+  const full = fullMode !== null
+  const single = full && fullMode !== 'all'
+  const [viewport, setViewport] = useState(() => ({ w: window.innerWidth, h: window.innerHeight }))
 
   useEffect(() => {
-    if (!fullScreen) return undefined
+    if (!full) return undefined
     const previousOverflow = document.body.style.overflow
-    const onKeyDown = event => {
-      if (event.key === 'Escape') setFullScreen(false)
-    }
+    const onKey = event => { if (event.key === 'Escape') setFullMode(null) }
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight })
+    onResize()
     document.body.style.overflow = 'hidden'
-    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('resize', onResize)
     return () => {
       document.body.style.overflow = previousOverflow
-      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', onResize)
     }
-  }, [fullScreen])
+  }, [full])
+
+  const closeFull = () => {
+    setFullMode(null)
+    leaveBrowserFullscreen()
+  }
+  const openFull = mode => {
+    setFullMode(mode)
+    enterBrowserFullscreen()
+  }
+
+  const fullModels = useMemo(
+    () => (single ? models.filter(item => item.id === fullMode) : models),
+    [models, single, fullMode]
+  )
+
+  // Sizes for the Full Screen view, calculated from the screen so nothing scrolls.
+  const fullLayout = useMemo(() => {
+    const gap = 12
+    const availW = viewport.w - 24 - 26 - 10
+    const nonEmpty = fullModels.filter(item => item.pickups.length > 0)
+    const emptyCount = fullModels.length - nonEmpty.length
+    // overlay padding + top bar + group headings (all-three view only) + gaps + "no trucks" lines
+    const headings = single ? 0 : fullModels.length * 30 + (fullModels.length - 1) * 10
+    const fixed = 24 + 26 + 44 + 10 + headings + emptyCount * 22
+    const scales = single ? [1.25, 1, 0.9, 0.8, 0.7, 0.6, 0.5] : [1, 0.9, 0.8, 0.7, 0.6, 0.5]
+    const plotCap = single ? 340 : 200
+    let chosen = null
+
+    for (const scale of scales) {
+      const colWidth = Math.round(96 * scale)
+      const barWidth = Math.round(46 * scale)
+      const nameSize = Math.max(8, Math.round(12 * scale))
+      const countSize = Math.max(9, Math.round(15 * scale))
+
+      let totalRows = 0
+      nonEmpty.forEach(item => {
+        let rowsCount = 1
+        let used = 0
+        item.pickups.forEach(pickup => {
+          const width = Math.max(150 * scale, pickup.clients.length * (colWidth + 6) + 28)
+          if (used > 0 && used + gap + width > availW) { rowsCount += 1; used = width } else { used += (used > 0 ? gap : 0) + width }
+        })
+        totalRows += rowsCount
+      })
+
+      const availH = (viewport.h - fixed) * 0.96 - Math.max(0, totalRows - nonEmpty.length) * gap
+      const chrome = 22 + 38 * scale + (nameSize * 3.6 + 7) + (countSize + 12) + 4
+      const plotHeight = Math.min(plotCap, Math.floor(availH / Math.max(1, totalRows) - chrome))
+      chosen = { scale, colWidth, barWidth, nameSize, countSize, plotHeight: Math.max(30, plotHeight) }
+      if (plotHeight >= (scale > 1 ? 130 : 70)) break
+    }
+    return chosen
+  }, [fullModels, single, viewport])
+
+  const activeModel = single ? fullModels[0] : null
+
+  return (
+    <section aria-label="Major exceptions by pickup group">
+      <style>{`
+        .mpc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 10px; font-weight: 600; }
+        .mpc-chip-neutral { background: #f1f5f9; color: #334155; }
+      `}</style>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', margin: '0 0 8px' }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 800, color: '#172033' }}>Major Exceptions by Pickup Group</h2>
+          <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#64748b' }}>{grandTotal.toLocaleString()} Major Exception trucks across DRC, Reload and Third Party.</p>
+        </div>
+        {grandTotal > 0 && (
+          <button className="secondary-button" type="button" onClick={() => openFull('all')}><Maximize2 size={13} /> All 3 Full Screen</button>
+        )}
+      </div>
+
+      {models.map(item => (
+        <MajorExceptionPickupChart key={item.id} model={item} title={item.label} onFullScreen={() => openFull(item.id)} />
+      ))}
+
+      {full && createPortal(
+        <div role="dialog" aria-modal="true" aria-label="Major Exceptions full screen"
+          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '12px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '12px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', minHeight: '34px' }}>
+              <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>
+                {single ? `${activeModel.label} — Major Exceptions` : 'Major Exceptions — All Pickup Groups'}
+                <span className="mpc-chip" style={{ marginLeft: '12px', fontSize: '12px', verticalAlign: 'middle' }}>
+                  {(single ? activeModel.totalTrucks : grandTotal).toLocaleString()} trucks
+                </span>
+                {single && <span className="mpc-chip mpc-chip-neutral" style={{ marginLeft: '6px', fontSize: '12px', verticalAlign: 'middle' }}>{activeModel.pickups.length.toLocaleString()} pickup points</span>}
+                {single && <span className="mpc-chip mpc-chip-neutral" style={{ marginLeft: '6px', fontSize: '12px', verticalAlign: 'middle' }}>{activeModel.clientCount.toLocaleString()} clients</span>}
+              </h2>
+              <button className="secondary-button" type="button" onClick={closeFull}><X size={13} /> Exit Full Screen</button>
+            </div>
+
+            <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {fullModels.map(item => (
+                <div key={item.id}>
+                  {!single && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', height: '24px', marginBottom: '6px' }}>
+                      <h3 style={{ margin: 0, fontSize: '20px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{item.label} — Major Exceptions</h3>
+                      <span className="mpc-chip">{item.totalTrucks.toLocaleString()} trucks</span>
+                      <span className="mpc-chip mpc-chip-neutral">{item.pickups.length.toLocaleString()} pickup points</span>
+                      <span className="mpc-chip mpc-chip-neutral">{item.clientCount.toLocaleString()} clients</span>
+                    </div>
+                  )}
+                  {item.pickups.length === 0
+                    ? <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>No Major Exception trucks in this group.</p>
+                    : <ClientBarCards pickups={item.pickups} dims={fullLayout} isFull />}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </section>
+  )
+}
+
+
+function RecordTable({ sectionId, title, description, rows, onDetails, options, columnFilters, onColumnFilter, statusFilter, onStatusFilter }) {
+  const [expanded, setExpanded] = useState(false)
+  const [sort, setSort] = useState(null)
   const sortedRows = useMemo(
     () => (sort ? [...rows].sort((a, b) => compareRows(a, b, sort.column, sort.direction)) : rows),
     [rows, sort]
   )
   const visibleRows = expanded ? sortedRows : sortedRows.slice(0, 8)
+  const [full, setFull] = useState(false)
+  const fsHostRef = useRef(null)
+  const fsInnerRef = useRef(null)
+  const [fsTick, setFsTick] = useState(0)
+
+  // Full Screen: re-fit when the window size changes.
+  useEffect(() => {
+    if (!full) return undefined
+    const onResize = () => setFsTick(tick => tick + 1)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [full])
+
+  // Full Screen: shrink the whole table (all rows) just enough to fit the screen, so no scrolling is needed.
+  // If there are so many rows that it would become unreadable (below 50%), it stops shrinking and scrolls instead.
+  useLayoutEffect(() => {
+    if (!full) return
+    const host = fsHostRef.current
+    const inner = fsInnerRef.current
+    if (!host || !inner) return
+    const availableHeight = host.clientHeight - 2
+    let chosen = 0.5
+    for (let zoom = 1; zoom >= 0.5; zoom = Math.round((zoom - 0.05) * 100) / 100) {
+      inner.style.width = `${100 / zoom}%`
+      inner.style.transform = `scale(${zoom})`
+      if (inner.getBoundingClientRect().height <= availableHeight) { chosen = zoom; break }
+    }
+    inner.style.width = `${100 / chosen}%`
+    inner.style.transform = `scale(${chosen})`
+  }, [full, sortedRows, fsTick])
+
+  useEffect(() => {
+    if (!full) return undefined
+    const previousOverflow = document.body.style.overflow
+    const onKey = event => { if (event.key === 'Escape') setFull(false) }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [full])
+
+  const closeFull = () => {
+    setFull(false)
+    leaveBrowserFullscreen()
+  }
+  const openFull = () => {
+    setFull(true)
+    enterBrowserFullscreen()
+  }
 
   // Click cycle for a column: ascending -> descending -> no sorting.
   function toggleSort(column) {
@@ -694,50 +805,8 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
     }
   }
 
-  return (
-    <section
-      className="records-section"
-      id={sectionId}
-      style={fullScreen ? {
-        position: 'fixed',
-        inset: 0,
-        zIndex: 4000,
-        width: '100vw',
-        height: '100vh',
-        maxHeight: '100vh',
-        overflow: 'auto',
-        boxSizing: 'border-box',
-        padding: '18px',
-        margin: 0,
-        background: '#f5f7fb',
-      } : undefined}
-    >
-      <div className="records-heading">
-        <div>
-          <div className="records-title-row"><h2>{title}</h2><span className="record-count">{rows.length.toLocaleString()} records</span></div>
-          <p>{description}</p>
-        </div>
-        <div className="records-heading-actions">
-          {fullScreen ? (
-            <button className="secondary-button" onClick={() => setFullScreen(false)} type="button" title="Close full screen (Esc)">
-              <X size={16} /> Exit Full Screen
-            </button>
-          ) : (
-            <button className="secondary-button" onClick={() => setFullScreen(true)} type="button" title="Show this table on the full screen">
-              <Maximize2 size={16} /> Full Screen
-            </button>
-          )}
-          <button className="table-screenshot-button" onClick={downloadFullTableScreenshot} type="button" title="Download only this table as a PNG, including every row">
-            <Camera size={15} /> Table Only PNG
-          </button>
-          <button className="secondary-button" onClick={() => setExpanded(!expanded)} type="button">
-            {expanded ? 'Show Less' : 'Expand Table'}
-            <ChevronDown size={16} className={expanded ? 'rotate-icon' : ''} />
-          </button>
-        </div>
-      </div>
-
-      <div className="table-wrap full-columns-table-wrap">
+  const renderTable = isFull => (
+      <div className="table-wrap full-columns-table-wrap" style={isFull ? { maxHeight: 'none', height: 'auto', overflow: 'visible' } : undefined}>
         <table className="wide-operations-table">
           <colgroup>
             {TABLE_COLUMN_WIDTHS.map((width, index) => <col key={index} style={{ width }} />)}
@@ -787,7 +856,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
             <th>Details</th>
           </tr></thead>
           <tbody>
-            {visibleRows.map(row => (
+            {(isFull ? sortedRows : visibleRows).map(row => (
               <tr key={row._id}>
                 <td className="days-count-cell" style={{ fontWeight: 700, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
                   {row._days === null ? '—' : `${row._days} ${row._days === 1 ? 'day' : 'days'}`}
@@ -805,8 +874,60 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
         </table>
         {rows.length === 0 && <div className="table-empty"><FileSpreadsheet size={25} /><strong>No matching records</strong><p>Try changing your filters or upload another Excel file.</p></div>}
       </div>
+  )
+
+  return (
+    <section className="records-section" id={sectionId}>
+      <div className="records-heading">
+        <div>
+          <div className="records-title-row"><h2>{title}</h2><span className="record-count">{rows.length.toLocaleString()} records</span></div>
+          <p>{description}</p>
+        </div>
+        <div className="records-heading-actions">
+          <button className="secondary-button" onClick={openFull} type="button" title="Open this table in full screen"><Maximize2 size={15} /> Full Screen</button>
+          <button className="table-screenshot-button" onClick={downloadFullTableScreenshot} type="button" title="Download only this table as a PNG, including every row">
+            <Camera size={15} /> Table Only PNG
+          </button>
+          <button className="secondary-button" onClick={() => setExpanded(!expanded)} type="button">
+            {expanded ? 'Show Less' : 'Expand Table'}
+            <ChevronDown size={16} className={expanded ? 'rotate-icon' : ''} />
+          </button>
+        </div>
+      </div>
+
+      {renderTable(false)}
 
       {rows.length > 8 && <button className="show-all-button" onClick={() => setExpanded(!expanded)}>{expanded ? 'Show fewer records' : `Show all ${rows.length} records`}</button>}
+
+      {full && createPortal(
+        <div role="dialog" aria-modal="true" aria-label={`${title} table full screen`}
+          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '12px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '12px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title}</h2>
+                  <span className="record-count">{rows.length.toLocaleString()} records</span>
+                </div>
+                <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#64748b' }}>{description}</p>
+              </div>
+              <button className="secondary-button" type="button" onClick={closeFull}><X size={13} /> Exit Full Screen</button>
+            </div>
+            <div ref={fsHostRef} className="records-section fs-table-host" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', position: 'relative', padding: 0, margin: 0, border: 'none', boxShadow: 'none', background: 'transparent' }}>
+              <style>{`
+                .fs-table-host .table-wrap { height: auto !important; max-height: none !important; overflow: visible !important; margin: 0 !important; }
+                .fs-table-host table { width: 100% !important; min-width: 0 !important; }
+                .fs-table-host thead th { position: static !important; }
+                .fs-table-host th, .fs-table-host td { padding: 3px 5px !important; }
+              `}</style>
+              <div ref={fsInnerRef} style={{ transformOrigin: 'top left' }}>
+                {renderTable(true)}
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </section>
   )
 }
@@ -814,7 +935,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
 function RecordModal({ row, onClose }) {
   if (!row) return null
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" style={{ zIndex: 4000 }} onClick={onClose}>
       <section className="details-modal" role="dialog" aria-modal="true" aria-label="Delivery record details" onClick={event => event.stopPropagation()}>
         <div className="modal-heading">
           <div><p className="eyebrow">DELIVERY DETAILS</p><h2>{clean(row['Delivery Number']) || 'Record details'}</h2><StatusBadge status={row._kpi} /></div>
@@ -1051,7 +1172,7 @@ function App() {
             ))}
           </section>
 
-          <MajorExceptionPickupChart rows={currentRows} />
+          <MajorExceptionSection rows={currentRows} />
 
           <section className="filter-toolbar" style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', margin: '4px 0 22px' }}>
             <label className="filter-search" style={{ flex: '1 1 280px', minWidth: '240px' }}><Search size={17} /><input type="search" placeholder="Search across all columns..." value={search} onChange={event => setSearch(event.target.value)} /></label>
