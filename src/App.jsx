@@ -485,7 +485,7 @@ function MajorExceptionPickupChart({ model, title, onFullScreen }) {
     <article className="panel major-pickup-panel" style={{ padding: '10px 12px', marginBottom: '10px', minWidth: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: 'clamp(17px, 2.4vw, 22px)', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title} — Major Exceptions</h2>
+          <h2 style={{ margin: 0, fontSize: 'clamp(17px, 2.4vw, 12px)', fontWeight: 500, lineHeight: 1.2, color: '#172033' }}>{title} — Major Exceptions</h2>
           <p style={{ margin: '2px 0 6px', color: '#64748b', fontSize: '11px' }}>
             Each bar is one client account at that pickup point.
           </p>
@@ -631,9 +631,15 @@ function MajorExceptionSection({ rows }) {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', margin: '0 0 8px' }}>
         <div style={{ minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 800, color: '#172033' }}>Major Exceptions by Pickup Group</h2>
+<section className="page-heading">
+
+  <div>
+    <h2 className='new'>Major Exceptions by Pickup Group</h2>
+  </div>
+</section>
           <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#64748b' }}>{grandTotal.toLocaleString()} Major Exception trucks across DRC, Reload and Third Party.</p>
         </div>
+        
         {grandTotal > 0 && (
           <button className="secondary-button" type="button" onClick={() => openFull('all')}><Maximize2 size={13} /> All 3 Full Screen</button>
         )}
@@ -1194,7 +1200,7 @@ function App() {
 
         <main className="dashboard-content" id="overview">
           <section className="page-heading">
-            <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>Witting To Load Overview</h1><p className="subtitle">Monitor Waiting To Load and Waiting for Documents aging and KPI exceptions across pickup points.</p></div>
+            <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>Waiting To Load</h1><p className="subtitle">Monitor Waiting To Load and Waiting for Documents aging and KPI exceptions across pickup points.</p></div>
             <div className="file-status"><span className={`status-dot ${fileName ? 'status-dot-ready' : ''}`} /><div><strong>{fileName || 'No file uploaded'}</strong><p>{fileName ? `${rows.length.toLocaleString()} Waiting To Load / Documents records loaded` : 'Upload an Excel file to begin'}</p></div></div>
           </section>
 
