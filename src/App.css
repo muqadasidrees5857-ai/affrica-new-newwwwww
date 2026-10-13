@@ -91,15 +91,7 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
 .error-banner svg { flex-shrink: 0; }
 
 /* Summary KPI tiles */
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-  gap: 12px !important;
-  width: 100% !important;
-  max-width: none !important;
-  margin-left: 0 !important;
-  margin-right: 0 !important;
-}
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 15px; margin-bottom: 20px; }
 .summary-card {
   position: relative; min-width: 0; min-height: 136px; padding: 18px 18px 16px; overflow: hidden;
   background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-sm);
@@ -313,15 +305,18 @@ section[aria-label="KPI performance by pickup group"] { display: grid; grid-temp
 
 /* Match the main content edge to the actual 220px sidebar. */
 .main-area {
-  margin-left: 0 !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-  width: 100% !important;
-  max-width: none !important;
+  margin-left: 220px;
+  min-width: 0;
+  width: calc(100% - 220px);
 }
 
 /* Use the available screen width instead of centering a narrow max-width canvas. */
-
+.dashboard-content {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 24px 24px 20px;
+}
 
 /* Keep all three group KPI cards in one row on desktop. */
 section[aria-label="KPI performance by pickup group"] {
@@ -666,8 +661,4 @@ section[aria-label="KPI performance by pickup group"] {
   .records-heading-actions { display: none !important; }
   .full-columns-table-wrap { max-height: none; overflow: visible; }
   .wide-operations-table thead th { position: static; }
-}
-.chart-legend .legend-item span,
-.chart-legend .legend-item strong {
-  font-size: 12px !important;
 }
