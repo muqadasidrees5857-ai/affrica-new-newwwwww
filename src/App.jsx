@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import html2canvas from 'html2canvas'
 import * as XLSX from 'xlsx'
@@ -353,23 +353,21 @@ function leaveBrowserFullscreen() {
 }
 
 /* ------------------------------------------------------------------
-   MAJOR EXCEPTION — CLIENT-WISE STANDING BARS
-   One card per pickup point. Inside each card every client account has
-   its own vertical bar (all bars in a chart share one scale), with the
-   truck count on top and the client name written under the bar.
-   A single Full Screen button above the three charts opens all three
-   groups together on one screen, auto-sized so nothing needs scrolling.
+   MAJOR EXCEPTION — CLIENT-WISE BAR CHART (horizontal bars)
+   Left: the pickup point. In front of it: one bar per client account that
+   has Major Exception trucks at that pickup point (count inside the bar,
+   client name on the left, shared "Record Count" axis on top).
+   The same client keeps the same colour everywhere in a chart.
    Only Major Exception trucks are counted; it never changes with filters.
+   Works on every screen size (phones stack the pickup name above its bars).
 ------------------------------------------------------------------ */
-const MAX_PICKUPS = 6
+const NORMAL_ROW_BUDGET = 24 // normal view shows pickup points until this many client rows are used
 
 const CLIENT_COLORS = [
   '#2563eb', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#06b6d4',
   '#f97316', '#84cc16', '#6366f1', '#14b8a6', '#e11d48', '#a16207',
   '#0ea5e9', '#7c3aed', '#65a30d', '#db2777',
 ]
-
-const NORMAL_DIMS = { plotHeight: 100, colWidth: 66, barWidth: 30, nameSize: 10, countSize: 12, scale: 1 }
 
 function buildMajorModel(rows, group) {
   const byPickup = new Map()
@@ -388,7 +386,7 @@ function buildMajorModel(rows, group) {
       clientTotals.set(client, (clientTotals.get(client) || 0) + 1)
     })
 
-  // The same client keeps the same colour in every pickup card (biggest client first).
+  // The same client keeps the same colour in every pickup block (biggest client first).
   const colorByClient = new Map(
     [...clientTotals.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -409,74 +407,85 @@ function buildMajorModel(rows, group) {
   return { pickups, totalTrucks, clientCount: clientTotals.size }
 }
 
-function ClientBarCards({ pickups, dims, isFull }) {
-  const { plotHeight, colWidth, barWidth, nameSize, countSize, scale } = dims
+// Round axis (0, 10, 20 ... ) with at most ~6 gridlines.
+function niceAxis(max) {
+  const raw = Math.max(1, max) / 5
+  const magnitude = 10 ** Math.floor(Math.log10(raw))
+  const normal = raw / magnitude
+  const step = Math.max(1, (normal <= 1 ? 1 : normal <= 2 ? 2 : normal <= 5 ? 5 : 10) * magnitude)
+  const ticks = Math.max(1, Math.ceil(max / step))
+  return { step, ticks }
+}
+
+function pickNormalPickups(pickups) {
+  const shown = []
+  let rowsUsed = 0
+  for (const pickup of pickups) {
+    if (shown.length > 0 && rowsUsed + pickup.clients.length > NORMAL_ROW_BUDGET) break
+    shown.push(pickup)
+    rowsUsed += pickup.clients.length
+  }
+  return shown
+}
+
+function ClientBarChart({ pickups, rowHeight, fontSize }) {
   const maxCount = Math.max(1, ...pickups.flatMap(pickup => pickup.clients.map(client => client.count)))
+  const axis = niceAxis(maxCount)
+  const tickValues = Array.from({ length: axis.ticks + 1 }, (_, index) => index * axis.step)
+  const axisTop = axis.ticks * axis.step
 
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: isFull ? '12px' : '10px', alignItems: 'stretch' }}>
-      {pickups.map((pickup, index) => (
-        <section
-          key={pickup.name}
-          style={{
-            flex: `1 1 ${Math.max(isFull ? 150 * scale : 150, pickup.clients.length * (colWidth + 6) + (isFull ? 28 : 24))}px`,
-            minWidth: 0, border: '1px solid #dfe6ef', borderRadius: '10px', background: '#ffffff',
-            padding: isFull ? '10px 12px' : '8px 10px', boxSizing: 'border-box',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
-            <h3 style={{ margin: 0, fontSize: isFull ? `${Math.max(10.5, 14 * scale)}px` : '11.5px', lineHeight: 1.25, color: '#172033', overflowWrap: 'anywhere' }}>
-              {index + 1}. {pickup.name}
-            </h3>
-            <span style={{ flex: 'none', padding: '1px 8px', borderRadius: '999px', background: '#fef2f2', color: '#b91c1c', fontSize: isFull ? `${Math.max(9, 12 * scale)}px` : '10px', fontWeight: 700 }}>
-              {pickup.total} {pickup.total === 1 ? 'truck' : 'trucks'}
-            </span>
+    <div className="mxc-chart" style={{ '--rh': `${rowHeight}px`, '--fs': `${fontSize}px`, '--ticks': axis.ticks }}>
+      <div className="mxc-axis">
+        <div className="mxc-axis-title">Record Count</div>
+        <div className="mxc-axis-ticks">
+          {tickValues.map((value, index) => (
+            <span key={value} style={{ left: `${(index / axis.ticks) * 100}%` }}>{value}</span>
+          ))}
+        </div>
+      </div>
+
+      {pickups.map(pickup => (
+        <div className="mxc-block" key={pickup.name}>
+          <div className="mxc-label" style={{ gridRow: `2 / span ${pickup.clients.length}` }} title={pickup.name}>
+            <span className="mxc-label-name">{pickup.name}</span>
+            <span className="mxc-label-total">{pickup.total} {pickup.total === 1 ? 'truck' : 'trucks'}</span>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-end', gap: '6px', height: `${plotHeight + countSize + 12}px`, borderBottom: '1px solid #cbd5e1' }}>
-            {pickup.clients.map(client => {
-              const barHeight = Math.max(6, (client.count / maxCount) * plotHeight)
-              return (
-                <div key={client.client} style={{ width: `${colWidth}px`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
-                  <strong style={{ fontSize: `${countSize}px`, lineHeight: 1.1, marginBottom: '3px', color: '#172033', fontVariantNumeric: 'tabular-nums' }}>{client.count}</strong>
-                  <div
-                    title={`${client.client}: ${client.count} ${client.count === 1 ? 'truck' : 'trucks'}`}
-                    style={{ width: `${barWidth}px`, height: `${barHeight}px`, background: client.color, borderRadius: '6px 6px 2px 2px' }}
-                  />
+          {pickup.clients.map((client, index) => {
+            const percent = (client.count / axisTop) * 100
+            const inside = percent >= 8
+            const tip = `${pickup.name} · ${client.client}: ${client.count} ${client.count === 1 ? 'truck' : 'trucks'}`
+            return (
+              <Fragment key={client.client}>
+                <div className="mxc-name" style={{ gridRow: index + 2 }} title={client.client}>{client.client}</div>
+                <div className="mxc-track" style={{ gridRow: index + 2 }}>
+                  <div className="mxc-bar" title={tip} style={{ width: `${percent}%`, background: client.color }} />
+                  <span
+                    className={`mxc-count ${inside ? 'mxc-count-in' : 'mxc-count-out'}`}
+                    style={inside ? { right: `calc(${100 - percent}% + 4px)` } : { left: `calc(${percent}% + 4px)` }}
+                  >
+                    {client.count}
+                  </span>
                 </div>
-              )
-            })}
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', gap: '6px', marginTop: '5px' }}>
-            {pickup.clients.map(client => (
-              <div
-                key={client.client}
-                title={client.client}
-                style={{
-                  width: `${colWidth}px`, textAlign: 'center', fontSize: `${nameSize}px`, lineHeight: 1.2, fontWeight: 600, color: '#334155',
-                  overflowWrap: 'anywhere', overflow: 'hidden', maxHeight: `${nameSize * 1.2 * 3 + 2}px`,
-                  display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
-                }}
-              >
-                {client.client}
-              </div>
-            ))}
-          </div>
-        </section>
+              </Fragment>
+            )
+          })}
+        </div>
       ))}
     </div>
   )
 }
 
-// One normal-view panel (no scrolling, top pickup points only) with its OWN Full Screen button.
+// One normal-view panel (top pickup points only) with its OWN Full Screen button.
 function MajorExceptionPickupChart({ model, title, onFullScreen }) {
   const { pickups, totalTrucks, clientCount } = model
+  const shown = pickNormalPickups(pickups)
   return (
-    <article className="panel major-pickup-panel" style={{ padding: '8px 10px', marginBottom: '8px', minWidth: 0 }}>
+    <article className="panel major-pickup-panel" style={{ padding: '10px 12px', marginBottom: '10px', minWidth: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', flexWrap: 'wrap' }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: '22px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title} — Major Exceptions</h2>
+        <div style={{ minWidth: 0 }}>
+          <h2 style={{ margin: 0, fontSize: 'clamp(17px, 2.4vw, 22px)', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title} — Major Exceptions</h2>
           <p style={{ margin: '2px 0 6px', color: '#64748b', fontSize: '11px' }}>
             Each bar is one client account at that pickup point.
           </p>
@@ -498,11 +507,11 @@ function MajorExceptionPickupChart({ model, title, onFullScreen }) {
           No Major Exception trucks in this group.
         </p>
       ) : (
-        <div style={{ marginTop: '8px' }}>
-          <ClientBarCards pickups={pickups.slice(0, MAX_PICKUPS)} dims={NORMAL_DIMS} isFull={false} />
-          {pickups.length > MAX_PICKUPS && (
+        <div style={{ marginTop: '10px' }}>
+          <ClientBarChart pickups={shown} rowHeight={20} fontSize={11} />
+          {pickups.length > shown.length && (
             <p style={{ margin: '6px 0 0', textAlign: 'center', fontSize: '10px', color: '#64748b' }}>
-              Top {MAX_PICKUPS} pickup points shown · +{pickups.length - MAX_PICKUPS} more in Full Screen
+              Top {shown.length} pickup point(s) shown · +{pickups.length - shown.length} more in Full Screen
             </p>
           )}
         </div>
@@ -510,6 +519,34 @@ function MajorExceptionPickupChart({ model, title, onFullScreen }) {
     </article>
   )
 }
+
+const MAJOR_CHART_CSS = `
+  .mpc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 10px; font-weight: 600; }
+  .mpc-chip-neutral { background: #f1f5f9; color: #334155; }
+
+  .mxc-chart { --lw: clamp(84px, 15%, 190px); --nw: clamp(110px, 24%, 270px); width: 100%; min-width: 0; }
+  .mxc-axis, .mxc-block { display: grid; grid-template-columns: var(--lw) var(--nw) minmax(0, 1fr); }
+  .mxc-axis { margin-bottom: 2px; }
+  .mxc-axis-title { grid-column: 3; text-align: center; font-size: 10px; font-weight: 600; color: #64748b; line-height: 1.2; }
+  .mxc-axis-ticks { grid-column: 3; position: relative; height: 14px; font-size: 10px; color: #64748b; }
+  .mxc-axis-ticks span { position: absolute; top: 0; transform: translateX(-50%); line-height: 14px; }
+
+  .mxc-block { grid-template-rows: auto; grid-auto-rows: minmax(var(--rh), auto); align-items: center; border-top: 1px solid #dfe6ef; padding: 4px 0; }
+  .mxc-label { grid-column: 1; align-self: start; display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-right: 8px; }
+  .mxc-label-name { font-size: calc(var(--fs) + 1px); font-weight: 700; color: #172033; line-height: 1.2; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .mxc-label-total { font-size: calc(var(--fs) - 1px); font-weight: 600; color: #b91c1c; }
+  .mxc-name { grid-column: 2; min-width: 0; padding-right: 8px; text-align: right; font-size: var(--fs); font-weight: 500; color: #334155; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mxc-track { grid-column: 3; position: relative; height: 100%; border-right: 1px solid #e2e8f0; background-image: linear-gradient(to right, #e2e8f0 1px, transparent 1px); background-size: calc(100% / var(--ticks)) 100%; background-repeat: repeat-x; }
+  .mxc-bar { position: absolute; left: 0; top: 50%; height: calc(var(--rh) - 4px); transform: translateY(-50%); border-radius: 0 3px 3px 0; }
+  .mxc-count { position: absolute; top: 50%; transform: translateY(-50%); font-size: var(--fs); font-weight: 700; line-height: 1; }
+  .mxc-count-in { color: #ffffff; text-shadow: 0 0 2px rgba(0, 0, 0, 0.4); }
+  .mxc-count-out { color: #172033; }
+
+  @media (max-width: 640px) {
+    .mxc-chart { --lw: 0px; --nw: clamp(100px, 38%, 180px); }
+    .mxc-label { grid-column: 1 / -1 !important; grid-row: 1 !important; flex-direction: row; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 0 0 3px; }
+  }
+`
 
 // The three charts. Every chart has its own Full Screen button (shows only that group),
 // and there is also one button on top that opens all three groups together.
@@ -554,57 +591,46 @@ function MajorExceptionSection({ rows }) {
     () => (single ? models.filter(item => item.id === fullMode) : models),
     [models, single, fullMode]
   )
+  // Wide screens: the three groups sit side by side. Small screens: one under the other.
+  const fullCols = fullMode === 'all' && viewport.w >= 1100 ? 3 : 1
 
-  // Sizes for the Full Screen view, calculated from the screen so nothing scrolls.
+  // Row height / font size for the Full Screen view, calculated from the screen so nothing scrolls.
   const fullLayout = useMemo(() => {
-    const gap = 12
-    const availW = viewport.w - 24 - 26 - 10
+    const availableHeight = (viewport.h - 4 - 46) * 0.97 // 1px margins + top bar
+    const axisHeight = 34
+    const blockPad = 10
+    const rowsOf = item => item.pickups.reduce((sum, pickup) => sum + Math.max(3, pickup.clients.length), 0)
     const nonEmpty = fullModels.filter(item => item.pickups.length > 0)
-    const emptyCount = fullModels.length - nonEmpty.length
-    // overlay padding + top bar + group headings (all-three view only) + gaps + "no trucks" lines
-    const headings = single ? 0 : fullModels.length * 30 + (fullModels.length - 1) * 10
-    const fixed = 24 + 26 + 44 + 10 + headings + emptyCount * 22
-    const scales = single ? [1.25, 1, 0.9, 0.8, 0.7, 0.6, 0.5] : [1, 0.9, 0.8, 0.7, 0.6, 0.5]
-    const plotCap = single ? 340 : 200
-    let chosen = null
+    let rowHeight = 34
 
-    for (const scale of scales) {
-      const colWidth = Math.round(96 * scale)
-      const barWidth = Math.round(46 * scale)
-      const nameSize = Math.max(8, Math.round(12 * scale))
-      const countSize = Math.max(9, Math.round(15 * scale))
-
-      let totalRows = 0
-      nonEmpty.forEach(item => {
-        let rowsCount = 1
-        let used = 0
-        item.pickups.forEach(pickup => {
-          const width = Math.max(150 * scale, pickup.clients.length * (colWidth + 6) + 28)
-          if (used > 0 && used + gap + width > availW) { rowsCount += 1; used = width } else { used += (used > 0 ? gap : 0) + width }
-        })
-        totalRows += rowsCount
-      })
-
-      const availH = (viewport.h - fixed) * 0.96 - Math.max(0, totalRows - nonEmpty.length) * gap
-      const chrome = 22 + 38 * scale + (nameSize * 3.6 + 7) + (countSize + 12) + 4
-      const plotHeight = Math.min(plotCap, Math.floor(availH / Math.max(1, totalRows) - chrome))
-      chosen = { scale, colWidth, barWidth, nameSize, countSize, plotHeight: Math.max(30, plotHeight) }
-      if (plotHeight >= (scale > 1 ? 130 : 70)) break
+    if (nonEmpty.length > 0) {
+      if (single) {
+        const item = nonEmpty[0]
+        rowHeight = (availableHeight - axisHeight - item.pickups.length * blockPad) / rowsOf(item)
+      } else if (fullCols === 3) {
+        rowHeight = Math.min(...nonEmpty.map(item => (availableHeight - 40 - axisHeight - item.pickups.length * blockPad - 6) / rowsOf(item)))
+      } else {
+        const pickupCount = nonEmpty.reduce((sum, item) => sum + item.pickups.length, 0)
+        const totalRows = nonEmpty.reduce((sum, item) => sum + rowsOf(item), 0)
+        const emptyCount = fullModels.length - nonEmpty.length
+        const fixed = nonEmpty.length * (30 + axisHeight + 10) + pickupCount * blockPad + emptyCount * 48
+        rowHeight = (availableHeight - fixed) / totalRows
+      }
     }
-    return chosen
-  }, [fullModels, single, viewport])
+
+    rowHeight = Math.max(10, Math.min(single ? 44 : 34, Math.floor(rowHeight)))
+    const fontSize = Math.max(8, Math.min(17, Math.round(rowHeight * 5.5) / 10))
+    return { rowHeight, fontSize }
+  }, [fullModels, single, fullCols, viewport])
 
   const activeModel = single ? fullModels[0] : null
 
   return (
     <section aria-label="Major exceptions by pickup group">
-      <style>{`
-        .mpc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 10px; font-weight: 600; }
-        .mpc-chip-neutral { background: #f1f5f9; color: #334155; }
-      `}</style>
+      <style>{MAJOR_CHART_CSS}</style>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', margin: '0 0 8px' }}>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 800, color: '#172033' }}>Major Exceptions by Pickup Group</h2>
           <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#64748b' }}>{grandTotal.toLocaleString()} Major Exception trucks across DRC, Reload and Third Party.</p>
         </div>
@@ -619,10 +645,11 @@ function MajorExceptionSection({ rows }) {
 
       {full && createPortal(
         <div role="dialog" aria-modal="true" aria-label="Major Exceptions full screen"
-          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '12px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '12px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', minHeight: '34px' }}>
-              <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>
+          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '1px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <style>{MAJOR_CHART_CSS}</style>
+          <div style={{ background: '#ffffff', borderRadius: 0, border: 'none', padding: '1px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', minHeight: '34px', flexWrap: 'wrap', padding: '2px 8px' }}>
+              <h2 style={{ margin: 0, fontSize: 'clamp(16px, 2.4vw, 24px)', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>
                 {single ? `${activeModel.label} — Major Exceptions` : 'Major Exceptions — All Pickup Groups'}
                 <span className="mpc-chip" style={{ marginLeft: '12px', fontSize: '12px', verticalAlign: 'middle' }}>
                   {(single ? activeModel.totalTrucks : grandTotal).toLocaleString()} trucks
@@ -633,20 +660,24 @@ function MajorExceptionSection({ rows }) {
               <button className="secondary-button" type="button" onClick={closeFull}><X size={13} /> Exit Full Screen</button>
             </div>
 
-            <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{
+              flex: '1 1 auto', minHeight: 0, overflowY: 'auto', alignContent: 'start',
+              display: fullCols === 3 ? 'grid' : 'flex', flexDirection: 'column',
+              gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: fullCols === 3 ? '10px' : '6px', padding: '0 4px',
+            }}>
               {fullModels.map(item => (
-                <div key={item.id}>
+                <div key={item.id} style={{ minWidth: 0 }}>
                   {!single && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', height: '24px', marginBottom: '6px' }}>
-                      <h3 style={{ margin: 0, fontSize: '20px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{item.label} — Major Exceptions</h3>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', minHeight: fullCols === 3 ? '40px' : '30px' }}>
+                      <h3 style={{ margin: 0, fontSize: fullCols === 3 ? '16px' : '20px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{item.label}</h3>
                       <span className="mpc-chip">{item.totalTrucks.toLocaleString()} trucks</span>
-                      <span className="mpc-chip mpc-chip-neutral">{item.pickups.length.toLocaleString()} pickup points</span>
-                      <span className="mpc-chip mpc-chip-neutral">{item.clientCount.toLocaleString()} clients</span>
+                      {fullCols !== 3 && <span className="mpc-chip mpc-chip-neutral">{item.pickups.length.toLocaleString()} pickup points</span>}
+                      {fullCols !== 3 && <span className="mpc-chip mpc-chip-neutral">{item.clientCount.toLocaleString()} clients</span>}
                     </div>
                   )}
                   {item.pickups.length === 0
                     ? <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>No Major Exception trucks in this group.</p>
-                    : <ClientBarCards pickups={item.pickups} dims={fullLayout} isFull />}
+                    : <ClientBarChart pickups={item.pickups} rowHeight={fullLayout.rowHeight} fontSize={fullLayout.fontSize} />}
                 </div>
               ))}
             </div>
@@ -901,9 +932,9 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
 
       {full && createPortal(
         <div role="dialog" aria-modal="true" aria-label={`${title} table full screen`}
-          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '12px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '12px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '1px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ background: '#ffffff', borderRadius: 0, border: 'none', padding: '1px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '2px 8px' }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                   <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title}</h2>
@@ -951,6 +982,38 @@ function RecordModal({ row, onClose }) {
     </div>
   )
 }
+
+// Page-wide responsive rules (phones, tablets, laptops, big screens).
+const PAGE_RESPONSIVE_CSS = `
+  .app-shell, .main-area, .dashboard-content { min-width: 0; }
+  html body .app-shell .main-area main.dashboard-content { width: 100% !important; max-width: none !important; margin-left: 0 !important; margin-right: 0 !important; padding-left: 0 !important; padding-right: 0 !important; box-sizing: border-box; }
+  .summary-grid { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+
+  @media (max-width: 1100px) {
+    .page-heading { flex-direction: column; align-items: stretch !important; gap: 12px; }
+    .tables-intro { flex-direction: column; align-items: flex-start !important; gap: 12px; }
+    .dashboard-export-buttons { flex-wrap: wrap; }
+    .records-heading { flex-wrap: wrap; gap: 10px; }
+    .records-heading-actions { flex-wrap: wrap; }
+    .full-columns-table-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+    .records-section:not(.fs-table-host) .wide-operations-table { min-width: 1000px; }
+    .chart-legend { flex-wrap: wrap; }
+  }
+
+  @media (max-width: 640px) {
+    .summary-grid { grid-template-columns: 1fr !important; }
+    .topbar { gap: 8px; }
+    .topbar-title { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .upload-button { padding-left: 10px !important; padding-right: 10px !important; font-size: 13px !important; }
+    .page-heading h1 { font-size: 24px !important; }
+    .file-status { width: 100%; box-sizing: border-box; }
+    .filter-toolbar > * { flex: 1 1 100% !important; min-width: 0 !important; width: 100%; }
+    .filter-toolbar .filter-select select { flex: 1; min-width: 0; }
+    .details-modal { width: calc(100vw - 20px) !important; max-width: none !important; max-height: 92vh; overflow-y: auto; }
+    .details-grid { grid-template-columns: 1fr !important; }
+    .overall-action-summary { flex-wrap: wrap; }
+  }
+`
 
 function App() {
   const emptyColumnFilters = () => Object.fromEntries(FILTER_COLUMNS.map(column => [column, '']))
@@ -1105,6 +1168,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <style>{PAGE_RESPONSIVE_CSS}</style>
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}>
         <div className="sidebar-brand">
