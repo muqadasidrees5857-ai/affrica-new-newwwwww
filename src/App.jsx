@@ -1225,7 +1225,7 @@ function App() {
                 <div className="pie-center"><strong>{counts.total.toLocaleString()}</strong><span>Total Records</span></div>
               </div>
               <div className="chart-legend">
-                {pieData.map(item => <div className="legend-item" key={item.name}><span className="legend-dot" style={{ background: COLORS[item.name], width: '14px', height: '14px' }} /><span style={{ fontSize: '17px' }}>{item.name}</span><strong style={{ fontSize: '24px' }}>{counts.total ? ((item.value / counts.total) * 100).toFixed(1) : '0.0'}%</strong></div>)}
+                {pieData.map(item => <div className="legend-item" key={item.name}><span className="legend-dot" style={{ background: COLORS[item.name], width: '14px', height: '14px' }} /><span style={{ fontSize: '12px' }}>{item.name}</span><strong style={{ fontSize: '12px' }}>{counts.total ? ((item.value / counts.total) * 100).toFixed(1) : '0.0'}%</strong></div>)}
               </div>
             </article>
           </section>
