@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import WelcomePage from './WelcomePage.jsx'
 import { createPortal } from 'react-dom'
 import html2canvas from 'html2canvas'
 import * as XLSX from 'xlsx'
@@ -6,7 +7,7 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import {
   LayoutDashboard, Truck, Upload, Search, FileSpreadsheet,
   AlertTriangle, CircleCheck, Clock3, Eye, Printer, Camera, ChevronDown,
-  Menu, X, RefreshCw, ArrowUp, ArrowDown, ArrowUpDown, Maximize2,
+  Menu, X, RefreshCw, ArrowUp, ArrowDown, ArrowUpDown, Maximize2, Home, PackageCheck,
 } from 'lucide-react'
 import './App.css'
 import './App.override.css'
@@ -19,15 +20,16 @@ const COLORS = {
 }
 
 const GROUPS = [
+  
   { id: 'drc', label: 'DRC' },
-  { id: 'reload', label: 'Pickup Points Using Reload' },
-  { id: 'third', label: 'Third Party / Other Pickup Points' },
+  { id: 'reload', label: 'Reload Warehouses' },
+  { id: 'third', label: 'Third-Party Other Pickup Points' },
 ]
 
 const EXCEL_COLUMNS = [
   'Client: Account Name',
   'Depart from Country',
-  'Pickup Point: Location Name',
+  'Job Pickup Point',
   'Delivery Number',
   'Horse: Asset No [Reg]',
   'Delivery Status',
@@ -66,6 +68,33 @@ const KPI_RULES = {
     third: { within: 3, exception: 5 },
   },
 }
+
+// Loading KPI: days from Loading Date until Document Received Date (or today if documents are not received yet).
+// These limits reuse the 'waiting for documents' rules. Change the numbers here if your Loading KPI is different.
+KPI_RULES.loading = {
+  drc:    { within: 6, exception: 12 },   // 0–6 | 7–12 | >12
+  reload: { within: 2, exception: 3 },    // 0–2 | 3    | >3
+  third:  { within: 3, exception: 5 },    // 0–3 | 4–5  | >5
+}
+
+// The two dashboard pages that open from the Welcome page.
+const PAGES = {
+  waiting: {
+    title: 'Waiting to Load',
+    categories: ['waiting to load', 'waiting for documents'],
+    subtitle: 'Monitor Waiting To Load aging and KPI exceptions across pickup points.',
+    scope: 'Waiting To Load + Waiting for Documents',
+    unit: 'Waiting To Load / Documents',
+  },
+  loading: {
+    title: 'Loading',
+    categories: ['loading'],
+    subtitle: 'Monitor Loading trucks: days from Loading Date until documents are received, with KPI exceptions across pickup points.',
+    scope: 'Loading (Loading Date → Document Received)',
+    unit: 'Loading',
+  },
+}
+const ALL_CATEGORIES = [...PAGES.waiting.categories, ...PAGES.loading.categories]
 
 function clean(value) {
   return String(value ?? '').trim()
@@ -147,9 +176,19 @@ function getWaitingDays(value) {
   return Math.max(0, Math.round((todayUtc - startUtc) / 86400000))
 }
 
+// Loading rows: Loading Date -> Document Received Date (or today when documents are still pending).
+function getLoadingDays(row) {
+  const start = getDate(row['Loading Date']) || getDate(row['Reporting Date'])
+  if (!start) return null
+  const end = getDate(row['Document Received Date']) || new Date()
+  const startUtc = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())
+  const endUtc = Date.UTC(end.getFullYear(), end.getMonth(), end.getDate())
+  return Math.max(0, Math.round((endUtc - startUtc) / 86400000))
+}
+
 function classifyGroup(row) {
   const country = clean(row['Depart from Country']).toLowerCase()
-  const pickup = clean(row['Pickup Point: Location Name'])
+  const pickup = clean(row['Job Pickup Point'])
   const isDRC = country.includes('democratic republic of the congo') || country.includes('democratic republic of congo') || country === 'drc' || country.includes('(drc)') || country.includes('congo, democratic republic')
   if (isDRC) return 'drc'
   if (/\breload\b/i.test(pickup)) return 'reload'
@@ -170,8 +209,9 @@ function classifyKPI(days, group, operationalCategory) {
 
 function prepareRow(row, index) {
   const group = classifyGroup(row)
-  const days = getWaitingDays(row['Reporting Date'])
   const operationalCategory = clean(row['Delivery Status'])
+  const isLoading = operationalCategory.toLowerCase() === 'loading'
+  const days = isLoading ? getLoadingDays(row) : getWaitingDays(row['Reporting Date'])
 
   return {
     ...row,
@@ -376,7 +416,7 @@ function buildMajorModel(rows, group) {
   rows
     .filter(row => row._group === group && row._kpi === 'Major Exception')
     .forEach(row => {
-      const pickup = clean(row['Pickup Point: Location Name']) || '(No pickup point)'
+      const pickup = clean(row['Job Pickup Point']) || '(No pickup point)'
       const client = clean(row['Client: Account Name']) || '(No client account name)'
       if (!byPickup.has(pickup)) byPickup.set(pickup, { pickup, total: 0, clients: new Map() })
       const pickupEntry = byPickup.get(pickup)
@@ -478,14 +518,14 @@ function ClientBarChart({ pickups, rowHeight, fontSize }) {
 }
 
 // One normal-view panel (top pickup points only) with its OWN Full Screen button.
-function MajorExceptionPickupChart({ model, title, onFullScreen }) {
+function MajorExceptionPickupChart({ model, title, pageTitle, onFullScreen }) {
   const { pickups, totalTrucks, clientCount } = model
   const shown = pickNormalPickups(pickups)
   return (
     <article className="panel major-pickup-panel" style={{ padding: '10px 12px', marginBottom: '10px', minWidth: 0 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <h2 style={{ margin: 0, fontSize: 'clamp(17px, 2.4vw, 12px)', fontWeight: 500, lineHeight: 1.2, color: '#172033' }}>{title} — Major Exceptions</h2>
+          <h2 style={{ margin: 0, fontSize: 'clamp(17px, 2.4vw, 12px)', fontWeight: 500, lineHeight: 1.2, color: '#172033' }}>{title} Major Exceptions- {pageTitle}</h2>
           <p style={{ margin: '2px 0 6px', color: '#64748b', fontSize: '11px' }}>
             Each bar is one client account at that pickup point.
           </p>
@@ -550,7 +590,7 @@ const MAJOR_CHART_CSS = `
 
 // The three charts. Every chart has its own Full Screen button (shows only that group),
 // and there is also one button on top that opens all three groups together.
-function MajorExceptionSection({ rows }) {
+function MajorExceptionSection({ rows, pageTitle }) {
   const models = useMemo(
     () => GROUPS.map(group => ({ ...group, ...buildMajorModel(rows, group.id) })),
     [rows]
@@ -646,7 +686,7 @@ function MajorExceptionSection({ rows }) {
       </div>
 
       {models.map(item => (
-        <MajorExceptionPickupChart key={item.id} model={item} title={item.label} onFullScreen={() => openFull(item.id)} />
+        <MajorExceptionPickupChart key={item.id} model={item} title={item.label} pageTitle={pageTitle} onFullScreen={() => openFull(item.id)} />
       ))}
 
       {full && createPortal(
@@ -705,47 +745,6 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
   )
   const visibleRows = expanded ? sortedRows : sortedRows.slice(0, 8)
   const [full, setFull] = useState(false)
-  const fsHostRef = useRef(null)
-  const fsInnerRef = useRef(null)
-  const [fsTick, setFsTick] = useState(0)
-
-  // Full Screen: re-fit when the window size changes.
-  useEffect(() => {
-    if (!full) return undefined
-    const onResize = () => setFsTick(tick => tick + 1)
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [full])
-
-  // Full Screen: shrink the whole table (all rows) just enough to fit the screen, so no scrolling is needed.
-  // If there are so many rows that it would become unreadable (below 50%), it stops shrinking and scrolls instead.
-  useLayoutEffect(() => {
-    if (!full) return
-    const host = fsHostRef.current
-    const inner = fsInnerRef.current
-    if (!host || !inner) return
-    const availableHeight = host.clientHeight - 2
-    let chosen = 0.5
-    for (let zoom = 1; zoom >= 0.5; zoom = Math.round((zoom - 0.05) * 100) / 100) {
-      inner.style.width = `${100 / zoom}%`
-      inner.style.transform = `scale(${zoom})`
-      if (inner.getBoundingClientRect().height <= availableHeight) { chosen = zoom; break }
-    }
-    inner.style.width = `${100 / chosen}%`
-    inner.style.transform = `scale(${chosen})`
-  }, [full, sortedRows, fsTick])
-
-  useEffect(() => {
-    if (!full) return undefined
-    const previousOverflow = document.body.style.overflow
-    const onKey = event => { if (event.key === 'Escape') setFull(false) }
-    document.body.style.overflow = 'hidden'
-    window.addEventListener('keydown', onKey)
-    return () => {
-      document.body.style.overflow = previousOverflow
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [full])
 
   const closeFull = () => {
     setFull(false)
@@ -755,6 +754,28 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
     setFull(true)
     enterBrowserFullscreen()
   }
+
+  useEffect(() => {
+    if (!full) return undefined
+    const previousBodyOverflow = document.body.style.overflow
+    const previousHtmlOverflow = document.documentElement.style.overflow
+    const onKey = event => { if (event.key === 'Escape') closeFull() }
+    const onFsChange = () => {
+      if (!document.fullscreenElement && full) {
+        setFull(false)
+      }
+    }
+    document.body.style.overflow = 'hidden'
+    document.documentElement.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKey)
+    document.addEventListener('fullscreenchange', onFsChange)
+    return () => {
+      document.body.style.overflow = previousBodyOverflow
+      document.documentElement.style.overflow = previousHtmlOverflow
+      window.removeEventListener('keydown', onKey)
+      document.removeEventListener('fullscreenchange', onFsChange)
+    }
+  }, [full])
 
   // Click cycle for a column: ascending -> descending -> no sorting.
   function toggleSort(column) {
@@ -843,7 +864,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
   }
 
   const renderTable = isFull => (
-      <div className="table-wrap full-columns-table-wrap" style={isFull ? { maxHeight: 'none', height: 'auto', overflow: 'visible' } : undefined}>
+      <div className={`table-wrap full-columns-table-wrap ${isFull ? 'fs-table-wrap' : ''}`}>
         <table className="wide-operations-table">
           <colgroup>
             {TABLE_COLUMN_WIDTHS.map((width, index) => <col key={index} style={{ width }} />)}
@@ -865,7 +886,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
             </th>
             {TABLE_COLUMNS.map(column => (
               <th key={column}>
-                {column}
+                {column === 'Job Pickup Point' ? 'Job Pickup Point' : column}
                 <HeaderFilter
                   label={column}
                   value={columnFilters[column]}
@@ -899,7 +920,7 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
                   {row._days === null ? '—' : `${row._days} ${row._days === 1 ? 'day' : 'days'}`}
                 </td>
                 {TABLE_COLUMNS.map(column => (
-                  <td key={column} className={column === 'Delivery Number' ? 'delivery-cell' : column === 'Pickup Point: Location Name' ? 'pickup-cell' : ''} title={clean(row[column])}>
+                  <td key={column} className={column === 'Delivery Number' ? 'delivery-cell' : column === 'Job Pickup Point' ? 'pickup-cell' : ''} title={clean(row[column])}>
                     {column.includes('Date') ? formatDate(row[column]) : clean(row[column]) || '—'}
                   </td>
                 ))}
@@ -938,28 +959,20 @@ function RecordTable({ sectionId, title, description, rows, onDetails, options, 
 
       {full && createPortal(
         <div role="dialog" aria-modal="true" aria-label={`${title} table full screen`}
-          style={{ position: 'fixed', inset: 0, zIndex: 3000, background: '#f5f7fb', padding: '1px', boxSizing: 'border-box', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ background: '#ffffff', borderRadius: 0, border: 'none', padding: '1px', height: '100%', minHeight: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '2px 8px' }}>
+          className="table-fullscreen-modal">
+          <div className="table-fullscreen-container">
+            <div className="table-fullscreen-header">
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                  <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title}</h2>
+                  <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 800, lineHeight: 1.2, color: '#172033' }}>{title}</h2>
                   <span className="record-count">{rows.length.toLocaleString()} records</span>
                 </div>
-                <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#64748b' }}>{description}</p>
+                <p style={{ margin: '3px 0 0', fontSize: '12px', color: '#64748b' }}>{description}</p>
               </div>
-              <button className="secondary-button" type="button" onClick={closeFull}><X size={13} /> Exit Full Screen</button>
+              <button className="secondary-button" type="button" onClick={closeFull}><X size={14} /> Exit Full Screen</button>
             </div>
-            <div ref={fsHostRef} className="records-section fs-table-host" style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', position: 'relative', padding: 0, margin: 0, border: 'none', boxShadow: 'none', background: 'transparent' }}>
-              <style>{`
-                .fs-table-host .table-wrap { height: auto !important; max-height: none !important; overflow: visible !important; margin: 0 !important; }
-                .fs-table-host table { width: 100% !important; min-width: 0 !important; }
-                .fs-table-host thead th { position: static !important; }
-                .fs-table-host th, .fs-table-host td { padding: 3px 5px !important; }
-              `}</style>
-              <div ref={fsInnerRef} style={{ transformOrigin: 'top left' }}>
-                {renderTable(true)}
-              </div>
+            <div className="table-fullscreen-body">
+              {renderTable(true)}
             </div>
           </div>
         </div>,
@@ -992,7 +1005,7 @@ function RecordModal({ row, onClose }) {
 // Page-wide responsive rules (phones, tablets, laptops, big screens).
 const PAGE_RESPONSIVE_CSS = `
   .app-shell, .main-area, .dashboard-content { min-width: 0; }
-  html body .app-shell .main-area main.dashboard-content { width: 100% !important; max-width: none !important; margin-left: 0 !important; margin-right: 0 !important; padding-left: 0 !important; padding-right: 0 !important; box-sizing: border-box; }
+  html body .app-shell .main-area main.dashboard-content { width: 100% !important; max-width: none !important; margin-left: 0 !important; margin-right: 0 !important; padding-left: clamp(14px, 2vw, 28px) !important; padding-right: clamp(14px, 2vw, 28px) !important; box-sizing: border-box; }
   .summary-grid { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 
   @media (max-width: 1100px) {
@@ -1002,7 +1015,7 @@ const PAGE_RESPONSIVE_CSS = `
     .records-heading { flex-wrap: wrap; gap: 10px; }
     .records-heading-actions { flex-wrap: wrap; }
     .full-columns-table-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
-    .records-section:not(.fs-table-host) .wide-operations-table { min-width: 1000px; }
+    .records-section .wide-operations-table { min-width: 1100px; }
     .chart-legend { flex-wrap: wrap; }
   }
 
@@ -1036,6 +1049,8 @@ function App() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [selectedRow, setSelectedRow] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  // 'home' (Welcome page) | 'waiting' | 'loading'. The file stays in memory while you switch pages.
+  const [page, setPage] = useState('home')
 
   // Check the local date every minute. When midnight passes, recalculate
   // waiting days and KPI statuses automatically without re-uploading Excel.
@@ -1052,11 +1067,26 @@ function App() {
   }, [])
 
   // `rows` holds the raw Excel rows. Days/KPI are recomputed here so they never go stale.
-  const currentRows = useMemo(
+  // allRows = Waiting To Load + Waiting for Documents + Loading (used by the Welcome page).
+  const allRows = useMemo(
     () => rows.map((row, index) => prepareRow(row, index)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows, todayKey]
   )
+
+  const pageConfig = PAGES[page] || PAGES.waiting
+
+  // Rows of the dashboard page that is open (Waiting To Load page or Loading page).
+  const currentRows = useMemo(
+    () => allRows.filter(row => pageConfig.categories.includes(clean(row._category).toLowerCase())),
+    [allRows, pageConfig]
+  )
+
+  // Truck counts shown on the two buttons of the Welcome page.
+  const homeStats = useMemo(() => ({
+    waiting: { total: allRows.filter(row => PAGES.waiting.categories.includes(clean(row._category).toLowerCase())).length },
+    loading: { total: allRows.filter(row => PAGES.loading.categories.includes(clean(row._category).toLowerCase())).length },
+  }), [allRows])
 
   async function handleFileUpload(event) {
     const file = event.target.files?.[0]
@@ -1065,22 +1095,23 @@ function App() {
     setError('')
     try {
       const buffer = await file.arrayBuffer()
-      const workbook = XLSX.read(buffer, { type: 'array' })
+      // raw: true keeps CSV dates as text (DD/MM/YYYY) so SheetJS cannot swap day and month.
+      const workbook = XLSX.read(buffer, { type: 'array', raw: true })
       const sheet = workbook.Sheets[workbook.SheetNames[0]]
       if (!sheet) throw new Error('The uploaded workbook has no readable worksheet.')
       const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
       if (rawRows.length === 0) throw new Error('The selected worksheet contains no records.')
 
       const headers = Object.keys(rawRows[0])
-      const required = ['Delivery Status', 'Depart from Country', 'Pickup Point: Location Name', 'Reporting Date']
+      const required = ['Delivery Status', 'Depart from Country', 'Job Pickup Point', 'Reporting Date']
       const missing = required.filter(header => !headers.includes(header))
       if (missing.length) throw new Error(`Missing required Excel columns: ${missing.join(', ')}`)
 
-      // Keep raw rows only; prepareRow runs in currentRows.
-      const waitingRows = rawRows.filter(row =>
-        ['waiting to load', 'waiting for documents'].includes(clean(row['Delivery Status']).toLowerCase())
+      // Keep raw rows only (Waiting To Load, Waiting for Documents and Loading); prepareRow runs in allRows.
+      const keptRows = rawRows.filter(row =>
+        ALL_CATEGORIES.includes(clean(row['Delivery Status']).toLowerCase())
       )
-      setRows(waitingRows)
+      setRows(keptRows)
       setFileName(file.name)
       setSearch('')
       setTableFilters(emptyTableFilters())
@@ -1172,6 +1203,29 @@ function App() {
     setStatusFilter('all')
   }
 
+  // Switch between Welcome / Waiting To Load / Loading. The uploaded data is NOT cleared.
+  function openPage(next) {
+    resetFilters()
+    setSidebarOpen(false)
+    setPage(next)
+    window.scrollTo({ top: 0 })
+  }
+
+  // Welcome page (shown first). All hooks are above, so this early return is safe.
+  if (page === 'home') {
+    return (
+      <WelcomePage
+        fileName={fileName}
+        loading={loading}
+        error={error}
+        allRows={allRows}
+        stats={homeStats}
+        onUpload={handleFileUpload}
+        onOpen={openPage}
+      />
+    )
+  }
+
   return (
     <div className="app-shell">
       <style>{PAGE_RESPONSIVE_CSS}</style>
@@ -1182,30 +1236,35 @@ function App() {
           <div><strong>Africa Operations</strong><span>KPI MONITORING</span></div>
           <button className="mobile-close" aria-label="Close navigation" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
-        <p className="sidebar-label">WORKSPACE</p>
-        <button className="nav-item active" onClick={() => scrollTo('overview')}><LayoutDashboard size={18} /> Overview</button>
+        <p className="sidebar-label">PAGES</p>
+        <button className="nav-item" onClick={() => openPage('home')}><Home size={18} /> Welcome</button>
+        <button className={`nav-item ${page === 'waiting' ? 'active' : ''}`} onClick={() => openPage('waiting')}><Clock3 size={18} /> Waiting To Load</button>
+        <button className={`nav-item ${page === 'loading' ? 'active' : ''}`} onClick={() => openPage('loading')}><PackageCheck size={18} /> Loading</button>
+        <p className="sidebar-label">THIS PAGE</p>
+        <button className="nav-item" onClick={() => scrollTo('overview')}><LayoutDashboard size={18} /> Overview</button>
         <button className="nav-item" onClick={() => scrollTo('table-drc')}><Truck size={18} /> DRC</button>
         <button className="nav-item" onClick={() => scrollTo('table-reload')}><RefreshCw size={18} /> Reload Pickup Points</button>
         <button className="nav-item" onClick={() => scrollTo('table-third')}><FileSpreadsheet size={18} /> Third Party</button>
         <button className="nav-item" onClick={() => scrollTo('action-summary')}><AlertTriangle size={18} /> Action Needed</button>
-        <div className="sidebar-bottom"><span className="sidebar-status-dot" /><div><strong>Dashboard Ready</strong><small>Waiting To Load + Waiting for Documents</small></div></div>
+        <div className="sidebar-bottom"><span className="sidebar-status-dot" /><div><strong>Dashboard Ready</strong><small>{pageConfig.scope}</small></div></div>
       </aside>
 
       <div className="main-area">
         <header className="topbar">
           <button className="mobile-menu" aria-label="Toggle navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(open => !open)} type="button"><Menu size={21} /></button>
-          <div className="topbar-title"><span>Operations /</span> Loading Performance</div>
+          <div className="topbar-title"><span>Operations /</span> {pageConfig.title}</div>
+          <button className="home-back-button" type="button" onClick={() => openPage('home')}><Home size={16} /> Home</button>
           <label className="upload-button"><Upload size={17} />{loading ? 'Reading file...' : 'Upload Excel File'}<input type="file" accept=".xlsx,.xls,.csv" hidden disabled={loading} onChange={handleFileUpload} /></label>
         </header>
 
         <main className="dashboard-content" id="overview">
           <section className="page-heading">
-            <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>Waiting To Load</h1><p className="subtitle">Monitor Waiting To Load and Waiting for Documents aging and KPI exceptions across pickup points.</p></div>
-            <div className="file-status"><span className={`status-dot ${fileName ? 'status-dot-ready' : ''}`} /><div><strong>{fileName || 'No file uploaded'}</strong><p>{fileName ? `${rows.length.toLocaleString()} Waiting To Load / Documents records loaded` : 'Upload an Excel file to begin'}</p></div></div>
+            <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>{pageConfig.title}</h1><p className="subtitle">{pageConfig.subtitle}</p></div>
+            <div className="file-status"><span className={`status-dot ${fileName ? 'status-dot-ready' : ''}`} /><div><strong>{fileName || 'No file uploaded'}</strong><p>{fileName ? `${currentRows.length.toLocaleString()} ${pageConfig.unit} records on this page` : 'Upload an Excel file to begin'}</p></div></div>
           </section>
 
           {error && <div className="error-banner"><AlertTriangle size={18} /><span>{error}</span></div>}
-          <div className="scope-note"><Clock3 size={17} /><span>Current view: <strong>Waiting To Load + Waiting for Documents</strong>.</span></div>
+          <div className="scope-note"><Clock3 size={17} /><span>Current view: <strong>{pageConfig.scope}</strong>.</span></div>
 
           <section className="summary-grid">
             <SummaryCard icon={Truck} title="All Truck Performance" value={counts.total} note="All operational records" color="navy" />
@@ -1216,7 +1275,7 @@ function App() {
 
           <section className="charts-grid">
             <article className="panel chart-panel pie-panel" style={{ gridColumn: '1 / -1' }}>
-              <div className="panel-heading"><div><h2>Overall Performance</h2><p>KPI status distribution</p></div><span className="panel-icon"><LayoutDashboard size={18} /></span></div>
+              <div className="panel-heading"><div><h2>Overall KPI - {pageConfig.title}</h2><p>KPI status distribution</p></div><span className="panel-icon"><LayoutDashboard size={18} /></span></div>
               <div className="pie-chart-wrap">
                 {counts.total === 0 ? <div className="chart-empty"><FileSpreadsheet size={28} /><p>Upload a file to see performance.</p></div> : (
                   <ResponsiveContainer width="100%" height="100%">
@@ -1242,7 +1301,7 @@ function App() {
             ))}
           </section>
 
-          <MajorExceptionSection rows={currentRows} />
+          <MajorExceptionSection rows={currentRows} pageTitle={pageConfig.title} />
 
           <section className="filter-toolbar" style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap', margin: '4px 0 22px' }}>
             <label className="filter-search" style={{ flex: '1 1 280px', minWidth: '240px' }}><Search size={17} /><input type="search" placeholder="Search across all columns..." value={search} onChange={event => setSearch(event.target.value)} /></label>
@@ -1264,13 +1323,13 @@ function App() {
             const description = group.id === 'drc'
               ? 'Depart from Country identifies the Democratic Republic of Congo.'
               : group.id === 'reload'
-                ? 'Non-DRC records where Pickup Point: Location Name contains the word Reload.'
+                ? 'Non-DRC records where Job Pickup Point contains the word Reload.'
                 : 'Non-DRC records where the pickup-point name does not contain Reload.'
             return (
               <RecordTable
                 key={group.id}
                 sectionId={`table-${group.id}`}
-                title={group.label}
+                title={`${group.label} - ${pageConfig.title}`}
                 description={description}
                 rows={groupRows}
                 onDetails={setSelectedRow}
