@@ -177,13 +177,15 @@ function getWaitingDays(value) {
 }
 
 // Loading rows: Loading Date -> Document Received Date (or today when documents are still pending).
+// Loading rows: days = Today - Loading Date (Document Received Date is NOT used).
 function getLoadingDays(row) {
-  const start = getDate(row['Loading Date']) || getDate(row['Reporting Date'])
+  const start = getDate(row['Loading Date'])
   if (!start) return null
-  const end = getDate(row['Document Received Date']) || new Date()
+
+  const today = new Date()
   const startUtc = Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())
-  const endUtc = Date.UTC(end.getFullYear(), end.getMonth(), end.getDate())
-  return Math.max(0, Math.round((endUtc - startUtc) / 86400000))
+  const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+  return Math.max(0, Math.round((todayUtc - startUtc) / 86400000))
 }
 
 function classifyGroup(row) {
