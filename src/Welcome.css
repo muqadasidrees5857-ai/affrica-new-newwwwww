@@ -9,7 +9,7 @@
     radial-gradient(900px 380px at 50% -140px, rgba(37, 181, 139, 0.16), transparent 70%),
     var(--canvas, #f4f7f6);
 }
-.welcome-inner { width: 100%; max-width: 1280px; display: flex; flex-direction: column; gap: 14px; }
+.welcome-inner { width: 100%; max-width: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; }
 
 /* ---- top: hero + upload ---- */
 .welcome-top { display: flex; flex-direction: column; gap: 18px; }
