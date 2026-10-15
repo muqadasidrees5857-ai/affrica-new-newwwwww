@@ -72,7 +72,7 @@ const KPI_RULES = {
 // Loading KPI: days from Loading Date until Document Received Date (or today if documents are not received yet).
 // These limits reuse the 'waiting for documents' rules. Change the numbers here if your Loading KPI is different.
 KPI_RULES.loading = {
-  drc:    { within: 6, exception: 12 },   // 0–6 | 7–12 | >12
+  drc:    { within: 5, exception: 10 },   // 0–5 | 6–10 | >10
   reload: { within: 2, exception: 3 },    // 0–2 | 3    | >3
   third:  { within: 3, exception: 5 },    // 0–3 | 4–5  | >5
 }
