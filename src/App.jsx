@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import WelcomePage from './WelcomePage.jsx'
+import HomePage from './Home.jsx'
 import { createPortal } from 'react-dom'
 import html2canvas from 'html2canvas'
 import * as XLSX from 'xlsx'
@@ -69,15 +69,14 @@ const KPI_RULES = {
   },
 }
 
-// Loading KPI: days from Loading Date until Document Received Date (or today if documents are not received yet).
-// These limits reuse the 'waiting for documents' rules. Change the numbers here if your Loading KPI is different.
+// Loading KPI: days = Today - Loading Date. Change the numbers below if the Loading KPI changes.
 KPI_RULES.loading = {
   drc:    { within: 5, exception: 10 },   // 0–5 | 6–10 | >10
   reload: { within: 2, exception: 3 },    // 0–2 | 3    | >3
   third:  { within: 3, exception: 5 },    // 0–3 | 4–5  | >5
 }
 
-// The two dashboard pages that open from the Welcome page.
+// The two dashboard pages that open from the Home page.
 const PAGES = {
   waiting: {
     title: 'Waiting to Load',
@@ -89,8 +88,8 @@ const PAGES = {
   loading: {
     title: 'Loading',
     categories: ['loading'],
-    subtitle: 'Monitor Loading trucks: days from Loading Date until documents are received, with KPI exceptions across pickup points.',
-    scope: 'Loading (Loading Date → Document Received)',
+    subtitle: 'Monitor Loading trucks: days since Loading Date (Today − Loading Date) with KPI exceptions across pickup points.',
+    scope: 'Loading (Today − Loading Date)',
     unit: 'Loading',
   },
 }
@@ -176,7 +175,6 @@ function getWaitingDays(value) {
   return Math.max(0, Math.round((todayUtc - startUtc) / 86400000))
 }
 
-// Loading rows: Loading Date -> Document Received Date (or today when documents are still pending).
 // Loading rows: days = Today - Loading Date (Document Received Date is NOT used).
 function getLoadingDays(row) {
   const start = getDate(row['Loading Date'])
@@ -411,6 +409,26 @@ const CLIENT_COLORS = [
   '#0ea5e9', '#7c3aed', '#65a30d', '#db2777',
 ]
 
+// Standing-days ageing for one client's trucks: min–max range + 5-day bands (1–5, 6–10, 11–15 ... 31+).
+function ageStats(days) {
+  const valid = days.filter(day => day !== null && day !== undefined)
+  if (valid.length === 0) return { minDays: null, maxDays: null, bands: [] }
+  const counts = new Map()
+  valid.forEach(day => {
+    const lo = day > 30 ? 31 : Math.floor((Math.max(day, 1) - 1) / 5) * 5 + 1
+    counts.set(lo, (counts.get(lo) || 0) + 1)
+  })
+  const bands = [...counts.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([lo, count]) => ({ label: lo === 31 ? '31+' : `${lo}–${lo + 4}`, count }))
+  return { minDays: Math.min(...valid), maxDays: Math.max(...valid), bands }
+}
+
+function formatAgeRange(minDays, maxDays) {
+  if (minDays === null) return '—'
+  return minDays === maxDays ? `${minDays} ${minDays === 1 ? 'day' : 'days'}` : `${minDays}–${maxDays} days`
+}
+
 function buildMajorModel(rows, group) {
   const byPickup = new Map()
   const clientTotals = new Map()
@@ -423,8 +441,10 @@ function buildMajorModel(rows, group) {
       if (!byPickup.has(pickup)) byPickup.set(pickup, { pickup, total: 0, clients: new Map() })
       const pickupEntry = byPickup.get(pickup)
       pickupEntry.total += 1
-      if (!pickupEntry.clients.has(client)) pickupEntry.clients.set(client, { client, count: 0 })
-      pickupEntry.clients.get(client).count += 1
+      if (!pickupEntry.clients.has(client)) pickupEntry.clients.set(client, { client, count: 0, days: [] })
+      const clientEntry = pickupEntry.clients.get(client)
+      clientEntry.count += 1
+      clientEntry.days.push(row._days)
       clientTotals.set(client, (clientTotals.get(client) || 0) + 1)
     })
 
@@ -441,7 +461,7 @@ function buildMajorModel(rows, group) {
       total: item.total,
       clients: [...item.clients.values()]
         .sort((a, b) => b.count - a.count || a.client.localeCompare(b.client))
-        .map(entry => ({ ...entry, color: colorByClient.get(entry.client) })),
+        .map(entry => ({ ...entry, color: colorByClient.get(entry.client), ...ageStats(entry.days) })),
     }))
     .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name))
 
@@ -485,6 +505,7 @@ function ClientBarChart({ pickups, rowHeight, fontSize }) {
             <span key={value} style={{ left: `${(index / axis.ticks) * 100}%` }}>{value}</span>
           ))}
         </div>
+        <div className="mxc-axis-age">Standing days</div>
       </div>
 
       {pickups.map(pickup => (
@@ -497,7 +518,9 @@ function ClientBarChart({ pickups, rowHeight, fontSize }) {
           {pickup.clients.map((client, index) => {
             const percent = (client.count / axisTop) * 100
             const inside = percent >= 8
-            const tip = `${pickup.name} · ${client.client}: ${client.count} ${client.count === 1 ? 'truck' : 'trucks'}`
+            const range = formatAgeRange(client.minDays, client.maxDays)
+            const bandText = client.bands.map(band => `${band.count} truck(s): ${band.label} days`).join(' | ')
+            const tip = `${pickup.name} · ${client.client}: ${client.count} ${client.count === 1 ? 'truck' : 'trucks'} standing ${range}`
             return (
               <Fragment key={client.client}>
                 <div className="mxc-name" style={{ gridRow: index + 2 }} title={client.client}>{client.client}</div>
@@ -509,6 +532,12 @@ function ClientBarChart({ pickups, rowHeight, fontSize }) {
                   >
                     {client.count}
                   </span>
+                </div>
+                <div className="mxc-age" style={{ gridRow: index + 2 }} title={`${tip}${bandText ? ` — ${bandText}` : ''}`}>
+                  <span className="mxc-range">{range}</span>
+                  {client.bands.map(band => (
+                    <span className="mxc-band" key={band.label}>{band.label}d<b>{band.count}</b></span>
+                  ))}
                 </div>
               </Fragment>
             )
@@ -529,7 +558,7 @@ function MajorExceptionPickupChart({ model, title, pageTitle, onFullScreen }) {
         <div style={{ minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: 'clamp(17px, 2.4vw, 12px)', fontWeight: 500, lineHeight: 1.2, color: '#172033' }}>{title} Major Exceptions- {pageTitle}</h2>
           <p style={{ margin: '2px 0 6px', color: '#64748b', fontSize: '11px' }}>
-            Each bar is one client account at that pickup point.
+            Each bar is one client account. Tags on the right show how many days the trucks have been standing.
           </p>
           <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
             <span className="mpc-chip">{totalTrucks.toLocaleString()} Major Exception trucks</span>
@@ -566,8 +595,8 @@ const MAJOR_CHART_CSS = `
   .mpc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 10px; font-weight: 600; }
   .mpc-chip-neutral { background: #f1f5f9; color: #334155; }
 
-  .mxc-chart { --lw: clamp(84px, 15%, 190px); --nw: clamp(110px, 24%, 270px); width: 100%; min-width: 0; }
-  .mxc-axis, .mxc-block { display: grid; grid-template-columns: var(--lw) var(--nw) minmax(0, 1fr); }
+  .mxc-chart { --lw: clamp(84px, 14%, 180px); --nw: clamp(110px, 20%, 240px); --aw: clamp(170px, 28%, 380px); width: 100%; min-width: 0; }
+  .mxc-axis, .mxc-block { display: grid; grid-template-columns: var(--lw) var(--nw) minmax(0, 1fr) var(--aw); }
   .mxc-axis { margin-bottom: 2px; }
   .mxc-axis-title { grid-column: 3; text-align: center; font-size: 10px; font-weight: 600; color: #64748b; line-height: 1.2; }
   .mxc-axis-ticks { grid-column: 3; position: relative; height: 14px; font-size: 10px; color: #64748b; }
@@ -583,9 +612,15 @@ const MAJOR_CHART_CSS = `
   .mxc-count { position: absolute; top: 50%; transform: translateY(-50%); font-size: var(--fs); font-weight: 700; line-height: 1; }
   .mxc-count-in { color: #ffffff; text-shadow: 0 0 2px rgba(0, 0, 0, 0.4); }
   .mxc-count-out { color: #172033; }
+  .mxc-axis-age { grid-column: 4; padding-left: 10px; font-size: 10px; font-weight: 600; color: #64748b; line-height: 1.2; text-align: left; }
+  .mxc-age { grid-column: 4; min-width: 0; display: flex; align-items: center; gap: 4px; padding-left: 10px; overflow: hidden; white-space: nowrap; font-size: calc(var(--fs) - 1px); }
+  .mxc-range { flex: none; padding: 1px 8px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-weight: 700; }
+  .mxc-band { flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 6px; background: #f1f5f9; color: #475569; font-weight: 500; }
+  .mxc-band b { color: #172033; font-weight: 700; }
 
   @media (max-width: 640px) {
-    .mxc-chart { --lw: 0px; --nw: clamp(100px, 38%, 180px); }
+    .mxc-chart { --lw: 0px; --nw: clamp(90px, 32%, 160px); --aw: 96px; }
+    .mxc-band { display: none; }
     .mxc-label { grid-column: 1 / -1 !important; grid-row: 1 !important; flex-direction: row; align-items: baseline; flex-wrap: wrap; gap: 8px; padding: 0 0 3px; }
   }
 `
@@ -1051,7 +1086,7 @@ function App() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [selectedRow, setSelectedRow] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  // 'home' (Welcome page) | 'waiting' | 'loading'. The file stays in memory while you switch pages.
+  // 'home' (Home page) | 'waiting' | 'loading'. The file stays in memory while you switch pages.
   const [page, setPage] = useState('home')
 
   // Check the local date every minute. When midnight passes, recalculate
@@ -1069,7 +1104,7 @@ function App() {
   }, [])
 
   // `rows` holds the raw Excel rows. Days/KPI are recomputed here so they never go stale.
-  // allRows = Waiting To Load + Waiting for Documents + Loading (used by the Welcome page).
+  // allRows = Waiting To Load + Waiting for Documents + Loading (used by the Home page).
   const allRows = useMemo(
     () => rows.map((row, index) => prepareRow(row, index)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1084,7 +1119,7 @@ function App() {
     [allRows, pageConfig]
   )
 
-  // Truck counts shown on the two buttons of the Welcome page.
+  // Truck counts shown on the two buttons of the Home page.
   const homeStats = useMemo(() => ({
     waiting: { total: allRows.filter(row => PAGES.waiting.categories.includes(clean(row._category).toLowerCase())).length },
     loading: { total: allRows.filter(row => PAGES.loading.categories.includes(clean(row._category).toLowerCase())).length },
@@ -1205,7 +1240,7 @@ function App() {
     setStatusFilter('all')
   }
 
-  // Switch between Welcome / Waiting To Load / Loading. The uploaded data is NOT cleared.
+  // Switch between Home / Waiting To Load / Loading. The uploaded data is NOT cleared.
   function openPage(next) {
     resetFilters()
     setSidebarOpen(false)
@@ -1213,10 +1248,10 @@ function App() {
     window.scrollTo({ top: 0 })
   }
 
-  // Welcome page (shown first). All hooks are above, so this early return is safe.
+  // Home page (shown first). All hooks are above, so this early return is safe.
   if (page === 'home') {
     return (
-      <WelcomePage
+      <HomePage
         fileName={fileName}
         loading={loading}
         error={error}
@@ -1239,7 +1274,7 @@ function App() {
           <button className="mobile-close" aria-label="Close navigation" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
         </div>
         <p className="sidebar-label">PAGES</p>
-        <button className="nav-item" onClick={() => openPage('home')}><Home size={18} /> Welcome</button>
+        <button className="nav-item" onClick={() => openPage('home')}><Home size={18} /> Home</button>
         <button className={`nav-item ${page === 'waiting' ? 'active' : ''}`} onClick={() => openPage('waiting')}><Clock3 size={18} /> Waiting To Load</button>
         <button className={`nav-item ${page === 'loading' ? 'active' : ''}`} onClick={() => openPage('loading')}><PackageCheck size={18} /> Loading</button>
         <p className="sidebar-label">THIS PAGE</p>

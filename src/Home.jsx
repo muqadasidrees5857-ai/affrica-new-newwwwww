@@ -85,7 +85,7 @@ export default function WelcomePage({ fileName, loading, error, allRows, stats, 
             <div className="welcome-logo"><Truck size={hasFile ? 24 : 30} /></div>
             <div className="welcome-hero-text">
               <p className="eyebrow">AFRICA OPERATIONS · KPI MONITORING</p>
-              <h1>Welcome to Logistics</h1>
+              <h1>Loading KPI Dashboard</h1>
               <p className="welcome-sub">Upload your operations file once, review the overall KPI board, then open the Waiting To Load or Loading dashboard.</p>
             </div>
           </header>
