@@ -1280,7 +1280,7 @@ function App() {
         <p className="sidebar-label">THIS PAGE</p>
         <button className="nav-item" onClick={() => scrollTo('overview')}><LayoutDashboard size={18} /> Overview</button>
         <button className="nav-item" onClick={() => scrollTo('table-drc')}><Truck size={18} /> DRC</button>
-        <button className="nav-item" onClick={() => scrollTo('table-reload')}><RefreshCw size={18} /> Reload Pickup Points</button>
+        <button className="nav-item" onClick={() => scrollTo('table-reload')}><RefreshCw size={18} /> Reload Warehouses</button>
         <button className="nav-item" onClick={() => scrollTo('table-third')}><FileSpreadsheet size={18} /> Third Party</button>
         <button className="nav-item" onClick={() => scrollTo('action-summary')}><AlertTriangle size={18} /> Action Needed</button>
         <div className="sidebar-bottom"><span className="sidebar-status-dot" /><div><strong>Dashboard Ready</strong><small>{pageConfig.scope}</small></div></div>
