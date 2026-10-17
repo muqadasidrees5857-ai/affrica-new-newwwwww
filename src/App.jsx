@@ -88,7 +88,7 @@ const PAGES = {
   loading: {
     title: 'Loading',
     categories: ['loading'],
-    subtitle: 'Monitor Loading trucks: days since Loading Date (Today − Loading Date) with KPI exceptions across pickup points.',
+    subtitle: 'Monitor Loading aging and KPI exceptions across pickup points.',
     scope: 'Loading (Today − Loading Date)',
     unit: 'Loading',
   },
